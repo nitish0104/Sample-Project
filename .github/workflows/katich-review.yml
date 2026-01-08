@@ -61,14 +61,19 @@ jobs:
           # Determine which API to use (priority order)
           if [ ! -z "$OPENAI_API_KEY" ]; then
             echo "🔑 Configuring OpenAI provider..."
+            # Use gpt-4-turbo-preview for larger context (128K tokens)
+            sed -i "s/model: gpt-4/model: gpt-4-turbo-preview/g" .katich/config.yaml
+            sed -i "s/max_input_tokens: 20000/max_input_tokens: 100000/g" .katich/config.yaml
             sed -i "s/api_key: \"\"/api_key: \"$OPENAI_API_KEY\"/g" .katich/config.yaml
-            echo "✅ OpenAI API key configured"
+            echo "✅ OpenAI API key configured with gpt-4-turbo-preview (128K context)"
             API_PROVIDER="openai"
             API_KEY_TO_TEST="$OPENAI_API_KEY"
           elif [ ! -z "$KATICH_LLM_API_KEY" ]; then
             echo "🔑 Configuring OpenAI provider (from KATICH_LLM_API_KEY)..."
+            sed -i "s/model: gpt-4/model: gpt-4-turbo-preview/g" .katich/config.yaml
+            sed -i "s/max_input_tokens: 20000/max_input_tokens: 100000/g" .katich/config.yaml
             sed -i "s/api_key: \"\"/api_key: \"$KATICH_LLM_API_KEY\"/g" .katich/config.yaml
-            echo "✅ OpenAI API key configured"
+            echo "✅ OpenAI API key configured with gpt-4-turbo-preview (128K context)"
             API_PROVIDER="openai"
             API_KEY_TO_TEST="$KATICH_LLM_API_KEY"
           elif [ ! -z "$ANTHROPIC_API_KEY" ]; then
