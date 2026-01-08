@@ -1,65 +1,85 @@
-name: Katich AI PR Review
+name: Katich AI Advanced Review
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+  workflow_dispatch:  # Allow manual triggers
+    inputs:
+      review_type:
+        description: 'Type of review'
+        required: false
+        default: 'diff'
+        type: choice
+        options:
+          - diff
+          - full
+          - latest
 
 jobs:
-  review:
+  katich-advanced-review:
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: write
-    env:
-      # Primary configuration - choose ONE based on your provider
-      KATICH_LLM_API_KEY: ${{ secrets.KATICH_LLM_API_KEY }}
-      
-      # Provider-specific (optional - only if your config.yaml specifies)
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      
-      # API Server configuration (if using enterprise/centralized keys)
-      KATICH_API_SERVER_URL: ${{ secrets.KATICH_API_SERVER_URL }}
-      KATICH_API_TOKEN: ${{ secrets.KATICH_API_TOKEN }}
-      
-      # Optional: Override default configuration
-      KATICH_MAX_INPUT_TOKENS: 20000
-      KATICH_HTML_OUTPUT: "true"
+      checks: write
     
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-
-      - name: Setup Katich AI
+          fetch-depth: 0  # Full history for better analysis
+      
+      - name: Cache Katich binary
+        uses: actions/cache@v4
+        id: cache-katich
+        with:
+          path: /usr/local/bin/katich
+          key: katich-${{ runner.os }}-latest
+      
+      - name: Download and Install Katich
+        if: steps.cache-katich.outputs.cache-hit != 'true'
         run: |
           curl -L https://github.com/kodehash/katichai-dist/releases/latest/download/katich_linux_amd64.tar.gz -o katich.tar.gz
           tar -xzf katich.tar.gz
-          mv katich-linux-amd64 katich
-          sudo mv katich /usr/local/bin/
-          katich version
-
-      - name: Initialize Katich with Environment Configuration
+          chmod +x katich-linux-amd64
+          sudo mv katich-linux-amd64 /usr/local/bin/katich
+      
+      - name: Verify Katich Installation
         run: |
-          # Checkout base branch
-          git fetch origin ${{ github.event.pull_request.base.ref }}
-          git checkout ${{ github.event.pull_request.base.ref }}
+          katich version
+          katich doctor
+      
+      - name: Initialize Katich
+        run: katich init
+      
+      - name: Configure Katich with Enhanced Settings
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          # Determine which provider to use
+          if [ ! -z "$OPENAI_API_KEY" ]; then
+            PROVIDER="openai"
+            MODEL="gpt-4"
+            API_KEY="$OPENAI_API_KEY"
+          elif [ ! -z "$ANTHROPIC_API_KEY" ]; then
+            PROVIDER="anthropic"
+            MODEL="claude-3-5-sonnet-20241022"
+            API_KEY="$ANTHROPIC_API_KEY"
+          else
+            echo "❌ No API key configured"
+            exit 1
+          fi
           
-          # Initialize katich
-          katich init
-          
-          # OPTION 1: Use environment variables only (no config file modification)
-          # Katich will automatically use the env vars we set above
-          
-          # OPTION 2: Create minimal config file
+          # Create enhanced config
           cat > .katich/config.yaml << EOF
-          project_name: ${{ github.event.repository.name }}
+          project_name: ${{ github.repository }}
           
           llm:
-            provider: openai
-            model: gpt-4
-            # api_key will be picked up from KATICH_LLM_API_KEY or OPENAI_API_KEY env var
+            provider: $PROVIDER
+            model: $MODEL
+            api_key: "$API_KEY"
+            max_input_tokens: 30000
           
           embeddings:
             provider: openai
@@ -68,48 +88,243 @@ jobs:
           review:
             generate_html: true
             html_output_path: .katich/reports
+          
+          analysis:
+            max_function_length: 50
+            complexity_threshold: 10
+            similarity_threshold: 0.70
+            min_function_lines: 5
+            duplicate_threshold: 0.85
+            ignore_trivial_patterns: true
+            sampling:
+              enabled: true
+              max_files: 100
+              context_lines: 3
+              skip_generated: true
+              skip_tests: false
+              adaptive_budget: true
           EOF
           
-          # Build context
-          katich context build
-
-      - name: Run Review on PR Diff
+          echo "✅ Enhanced configuration created"
+      
+      - name: Cache Context Data
+        uses: actions/cache@v4
+        with:
+          path: |
+            .katich/context.json
+            .katich/embeddings.json
+          key: katich-context-${{ github.sha }}
+          restore-keys: |
+            katich-context-${{ github.event.pull_request.base.sha }}
+            katich-context-
+      
+      - name: Build Context with Caching
         run: |
-          # Fetch feature branch
-          git fetch origin ${{ github.event.pull_request.head.ref }}
+          if [ -f ".katich/context.json" ]; then
+            echo "✅ Using cached context"
+          else
+            echo "🔍 Building fresh context..."
+            katich context build
+          fi
+      
+      - name: Determine Review Type
+        id: review-type
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            REVIEW_TYPE="${{ inputs.review_type }}"
+          else
+            REVIEW_TYPE="diff"
+          fi
+          echo "review_type=$REVIEW_TYPE" >> $GITHUB_OUTPUT
+      
+      - name: Run Katich Review
+        id: katich-review
+        run: |
+          BASE_REF="${{ github.event.pull_request.base.ref || github.ref_name }}"
+          HEAD_REF="${{ github.event.pull_request.head.ref || github.ref_name }}"
+          REVIEW_TYPE="${{ steps.review-type.outputs.review_type }}"
           
-          # Run review with environment variables
-          katich review diff ${{ github.event.pull_request.base.ref }}..${{ github.event.pull_request.head.ref }} \
-            --output markdown \
-            --output-file review.md
-
-      - name: Upload HTML Report as Artifact
+          echo "📊 Review Configuration:"
+          echo "  Type: $REVIEW_TYPE"
+          echo "  Base: $BASE_REF"
+          echo "  Head: $HEAD_REF"
+          
+          case $REVIEW_TYPE in
+            "diff")
+              katich review diff origin/$BASE_REF..origin/$HEAD_REF --output markdown > review.md 2>&1
+              ;;
+            "full")
+              katich review full --output markdown > review.md 2>&1
+              ;;
+            "latest")
+              katich review latest --output markdown > review.md 2>&1
+              ;;
+          esac
+          
+          # Capture exit code but continue
+          EXIT_CODE=$?
+          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
+          
+          # Always display output
+          cat review.md || echo "No review output generated"
+      
+      - name: Parse Review Results
+        id: parse-results
+        run: |
+          # Count issues
+          CRITICAL=$(grep -c "🔴" review.md 2>/dev/null || echo "0")
+          WARNING=$(grep -c "🟡" review.md 2>/dev/null || echo "0")
+          SECURITY=$(grep -c "\[SECURITY\]" review.md 2>/dev/null || echo "0")
+          
+          echo "critical=$CRITICAL" >> $GITHUB_OUTPUT
+          echo "warning=$WARNING" >> $GITHUB_OUTPUT
+          echo "security=$SECURITY" >> $GITHUB_OUTPUT
+          
+          echo "📊 Review Statistics:"
+          echo "  🔴 Critical: $CRITICAL"
+          echo "  🟡 Warnings: $WARNING"
+          echo "  🛡️  Security: $SECURITY"
+      
+      - name: Generate Detailed PR Comment
+        run: |
+          cat > pr_comment.md << 'EOF'
+          ## 🤖 Katich AI Code Review Results
+          
+          ### 📊 Summary
+          - 🔴 **Critical Issues**: ${{ steps.parse-results.outputs.critical }}
+          - 🟡 **Warnings**: ${{ steps.parse-results.outputs.warning }}
+          - 🛡️ **Security Issues**: ${{ steps.parse-results.outputs.security }}
+          
+          ### 📝 Detailed Review
+          EOF
+          
+          # Add review content
+          if [ -f "review.md" ]; then
+            cat review.md >> pr_comment.md
+          else
+            echo "No review output available. Check workflow logs for details." >> pr_comment.md
+          fi
+          
+          # Add footer
+          cat >> pr_comment.md << 'EOF'
+          
+          ---
+          
+          ### 📦 Artifacts
+          - Download the full HTML report from the workflow artifacts
+          - Review type: ${{ steps.review-type.outputs.review_type }}
+          - Commit: `${{ github.sha }}`
+          
+          <details>
+          <summary>ℹ️ About this review</summary>
+          
+          This automated review was generated by [Katich AI](https://github.com/kodehash/katichai-dist).
+          
+          **Review Configuration:**
+          - Provider: ${{ env.OPENAI_API_KEY != '' && 'OpenAI' || 'Anthropic' }}
+          - Context: Enabled
+          - Max Files: 100
+          
+          </details>
+          EOF
+      
+      - name: Post/Update PR Comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const commentBody = fs.readFileSync('pr_comment.md', 'utf8');
+            
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            
+            const botComment = comments.find(comment => 
+              comment.body.includes('🤖 Katich AI Code Review Results')
+            );
+            
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: commentBody
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: commentBody
+              });
+            }
+      
+      - name: Create Check Run Status
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const critical = parseInt('${{ steps.parse-results.outputs.critical }}');
+            const security = parseInt('${{ steps.parse-results.outputs.security }}');
+            
+            let conclusion = 'success';
+            let summary = '✅ No critical issues found';
+            
+            if (security > 0) {
+              conclusion = 'failure';
+              summary = `🛡️ ${security} security issue(s) found - Review required!`;
+            } else if (critical > 0) {
+              conclusion = 'neutral';
+              summary = `⚠️ ${critical} critical issue(s) found - Please review`;
+            }
+            
+            await github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: 'Katich AI Review',
+              head_sha: context.sha,
+              status: 'completed',
+              conclusion: conclusion,
+              output: {
+                title: 'Katich AI Code Review',
+                summary: summary,
+                text: `Critical: ${critical} | Security: ${security} | Warnings: ${{ steps.parse-results.outputs.warning }}`
+              }
+            });
+      
+      - name: Upload Reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: katich-report-${{ github.event.pull_request.number }}
-          path: .katich/reports/
-          retention-days: 7
-
-      - name: Post Review as PR Comment
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const report = fs.readFileSync('review.md', 'utf8');
-            
-            // Format the report for GitHub
-            const formattedReport = `## 🤖 Katich AI Code Review
-            
-**Review for PR #${context.issue.number}**
-            
-${report}
-            
-📊 *HTML report available in workflow artifacts*`;
-            
-            await github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: formattedReport
-            });
+          name: katich-review-reports-${{ github.sha }}
+          path: |
+            .katich/reports/**/*
+            review.md
+            pr_comment.md
+          retention-days: 90
+      
+      - name: Fail on Security Issues
+        if: steps.parse-results.outputs.security > 0
+        run: |
+          echo "::error::Security issues detected! Review required before merge."
+          echo "Found ${{ steps.parse-results.outputs.security }} security issue(s)"
+          exit 1
+      
+      - name: Summary
+        if: always()
+        run: |
+          echo "## 🎯 Review Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Results" >> $GITHUB_STEP_SUMMARY
+          echo "- 🔴 Critical Issues: ${{ steps.parse-results.outputs.critical }}" >> $GITHUB_STEP_SUMMARY
+          echo "- 🟡 Warnings: ${{ steps.parse-results.outputs.warning }}" >> $GITHUB_STEP_SUMMARY
+          echo "- 🛡️ Security Issues: ${{ steps.parse-results.outputs.security }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Actions" >> $GITHUB_STEP_SUMMARY
+          echo "- View detailed HTML report in artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "- Check PR comment for full review" >> $GITHUB_STEP_SUMMARY
