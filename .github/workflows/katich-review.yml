@@ -1,400 +1,384 @@
-name: Katich AI Advanced Review
+name: Katich AI Code Review
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-  workflow_dispatch:
-    inputs:
-      review_type:
-        description: 'Type of review'
-        required: false
-        default: 'diff'
-        type: choice
-        options:
-          - diff
-          - full
-          - latest
+    branches:
+      - main
+      - develop
+      - master
 
 jobs:
-  katich-advanced-review:
+  katich-review:
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: write
-      checks: write
     
     steps:
-      - name: Checkout repository with full history
+      - name: Checkout base branch with full history
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.base.ref || github.ref_name }}
+          ref: ${{ github.event.pull_request.base.ref }}
           fetch-depth: 0
       
-      - name: Debug Git Information
+      - name: Fetch PR head branch
         run: |
-          echo "📊 Git Repository Information:"
-          echo "Current branch: $(git branch --show-current)"
-          echo "Current commit: $(git rev-parse HEAD)"
-          echo "All branches:"
-          git branch -a
+          echo "🔄 Fetching PR branches..."
+          git fetch origin ${{ github.event.pull_request.head.ref }}
+          
+          echo "📊 Repository state:"
+          echo "Base branch: ${{ github.event.pull_request.base.ref }}"
+          echo "Head branch: ${{ github.event.pull_request.head.ref }}"
           echo ""
-          echo "Recent commits:"
-          git log --oneline -10
-      
-      - name: Cache Katich binary
-        uses: actions/cache@v4
-        id: cache-katich
-        with:
-          path: /usr/local/bin/katich
-          key: katich-${{ runner.os }}-latest
+          echo "Available branches:"
+          git branch -a | grep -E "${{ github.event.pull_request.base.ref }}|${{ github.event.pull_request.head.ref }}"
       
       - name: Download and Install Katich
-        if: steps.cache-katich.outputs.cache-hit != 'true'
         run: |
+          echo "📥 Downloading Katich..."
           curl -L https://github.com/kodehash/katichai-dist/releases/latest/download/katich_linux_amd64.tar.gz -o katich.tar.gz
           tar -xzf katich.tar.gz
           chmod +x katich-linux-amd64
           sudo mv katich-linux-amd64 /usr/local/bin/katich
-      
-      - name: Verify Katich Installation
-        run: |
-          echo "🔍 Verifying Katich installation..."
+          
+          echo "✅ Katich installed:"
           katich version
-          echo ""
-          echo "🏥 Running diagnostics..."
-          katich doctor || true
       
       - name: Initialize Katich
         run: |
           echo "🚀 Initializing Katich..."
           katich init
-          echo "✅ Katich initialized"
+          echo "✅ Katich configuration created"
           ls -la .katich/
       
-      - name: Configure Katich with Enhanced Settings
+      - name: Configure Katich
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          KATICH_LLM_API_KEY: ${{ secrets.KATICH_LLM_API_KEY }}
         run: |
+          # Determine which API to use (priority order)
           if [ ! -z "$OPENAI_API_KEY" ]; then
-            PROVIDER="openai"
-            MODEL="gpt-4"
-            API_KEY="$OPENAI_API_KEY"
-            echo "✅ Using OpenAI provider"
+            echo "🔑 Configuring OpenAI provider..."
+            sed -i "s/api_key: \"\"/api_key: \"$OPENAI_API_KEY\"/g" .katich/config.yaml
+            echo "✅ OpenAI API key configured"
+            API_PROVIDER="openai"
+            API_KEY_TO_TEST="$OPENAI_API_KEY"
+          elif [ ! -z "$KATICH_LLM_API_KEY" ]; then
+            echo "🔑 Configuring OpenAI provider (from KATICH_LLM_API_KEY)..."
+            sed -i "s/api_key: \"\"/api_key: \"$KATICH_LLM_API_KEY\"/g" .katich/config.yaml
+            echo "✅ OpenAI API key configured"
+            API_PROVIDER="openai"
+            API_KEY_TO_TEST="$KATICH_LLM_API_KEY"
           elif [ ! -z "$ANTHROPIC_API_KEY" ]; then
-            PROVIDER="anthropic"
-            MODEL="claude-3-5-sonnet-20241022"
-            API_KEY="$ANTHROPIC_API_KEY"
-            echo "✅ Using Anthropic provider"
+            echo "🔑 Configuring Anthropic provider..."
+            sed -i "s/provider: openai/provider: anthropic/g" .katich/config.yaml
+            sed -i "s/model: gpt-4/model: claude-3-5-sonnet-20241022/g" .katich/config.yaml
+            sed -i "s/api_key: \"\"/api_key: \"$ANTHROPIC_API_KEY\"/g" .katich/config.yaml
+            echo "✅ Anthropic API key configured"
+            API_PROVIDER="anthropic"
+            API_KEY_TO_TEST="$ANTHROPIC_API_KEY"
           else
-            echo "❌ No API key configured"
-            echo "::error::Please set OPENAI_API_KEY or ANTHROPIC_API_KEY in GitHub Secrets"
+            echo "::error::❌ No API key found!"
+            echo "Please set OPENAI_API_KEY or ANTHROPIC_API_KEY in repository secrets"
+            echo "Go to: Settings > Secrets and variables > Actions > New repository secret"
             exit 1
           fi
           
-          cat > .katich/config.yaml << EOF
-          project_name: ${{ github.repository }}
+          # Export for next step
+          echo "API_PROVIDER=$API_PROVIDER" >> $GITHUB_ENV
+          echo "API_KEY_TO_TEST=$API_KEY_TO_TEST" >> $GITHUB_ENV
           
-          llm:
-            provider: $PROVIDER
-            model: $MODEL
-            api_key: "$API_KEY"
-            max_input_tokens: 30000
-          
-          embeddings:
-            provider: openai
-            model: text-embedding-3-small
-          
-          review:
-            generate_html: true
-            html_output_path: .katich/reports
-          
-          analysis:
-            max_function_length: 50
-            complexity_threshold: 10
-            similarity_threshold: 0.70
-            min_function_lines: 5
-            duplicate_threshold: 0.85
-            ignore_trivial_patterns: true
-            sampling:
-              enabled: true
-              max_files: 100
-              context_lines: 3
-              skip_generated: true
-              skip_tests: false
-              adaptive_budget: true
-          EOF
-          
-          echo "✅ Configuration created successfully"
+          echo ""
+          echo "📋 Configuration preview:"
+          grep -E "provider:|model:" .katich/config.yaml
       
-      - name: Fetch PR Head Branch
-        if: github.event_name == 'pull_request'
+      - name: Verify API Key
+        env:
+          API_PROVIDER: ${{ env.API_PROVIDER }}
+          API_KEY_TO_TEST: ${{ env.API_KEY_TO_TEST }}
         run: |
-          echo "🔄 Fetching PR head branch..."
-          git fetch origin ${{ github.event.pull_request.head.ref }}
-          echo "✅ Head branch fetched"
+          echo "🔍 Testing API key connectivity..."
           
-          echo "📊 Available refs:"
-          git show-ref | grep -E "(heads|remotes)" || true
-      
-      - name: Cache Context Data
-        uses: actions/cache@v4
-        with:
-          path: |
-            .katich/context.json
-            .katich/embeddings.json
-          key: katich-context-${{ github.sha }}
-          restore-keys: |
-            katich-context-
+          if [ "$API_PROVIDER" = "openai" ]; then
+            echo "Testing OpenAI API key..."
+            
+            # Test OpenAI API
+            HTTP_CODE=$(curl -s -o response.json -w "%{http_code}" \
+              https://api.openai.com/v1/models \
+              -H "Authorization: Bearer $API_KEY_TO_TEST" \
+              -H "Content-Type: application/json")
+            
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "✅ OpenAI API key is valid and working!"
+              echo "📊 Available models:"
+              cat response.json | grep -o '"id":"[^"]*"' | head -5 | sed 's/"id":"\([^"]*\)"/  - \1/'
+            elif [ "$HTTP_CODE" = "401" ]; then
+              echo "::error::❌ OpenAI API key is INVALID!"
+              echo "The API key authentication failed."
+              echo "Please check:"
+              echo "  1. The API key is correct (should start with 'sk-')"
+              echo "  2. The key hasn't been revoked"
+              echo "  3. Copy-paste the key carefully without extra spaces"
+              cat response.json
+              exit 1
+            elif [ "$HTTP_CODE" = "429" ]; then
+              echo "::warning::⚠️ Rate limit reached or quota exceeded"
+              echo "Please check your OpenAI account:"
+              echo "  1. Visit: https://platform.openai.com/usage"
+              echo "  2. Ensure you have credits available"
+              echo "  3. Check if you've hit rate limits"
+              cat response.json
+              exit 1
+            else
+              echo "::warning::⚠️ Unexpected response from OpenAI API (HTTP $HTTP_CODE)"
+              echo "Response:"
+              cat response.json
+              echo ""
+              echo "Continuing anyway, but review may fail..."
+            fi
+            
+          elif [ "$API_PROVIDER" = "anthropic" ]; then
+            echo "Testing Anthropic API key..."
+            
+            # Test Anthropic API
+            HTTP_CODE=$(curl -s -o response.json -w "%{http_code}" \
+              https://api.anthropic.com/v1/messages \
+              -H "x-api-key: $API_KEY_TO_TEST" \
+              -H "anthropic-version: 2023-06-01" \
+              -H "content-type: application/json" \
+              -d '{
+                "model": "claude-3-5-sonnet-20241022",
+                "max_tokens": 10,
+                "messages": [{"role": "user", "content": "test"}]
+              }')
+            
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "✅ Anthropic API key is valid and working!"
+            elif [ "$HTTP_CODE" = "401" ]; then
+              echo "::error::❌ Anthropic API key is INVALID!"
+              echo "The API key authentication failed."
+              echo "Please check your API key at: https://console.anthropic.com/"
+              cat response.json
+              exit 1
+            elif [ "$HTTP_CODE" = "429" ]; then
+              echo "::warning::⚠️ Rate limit reached"
+              echo "Please check your Anthropic account usage"
+              cat response.json
+              exit 1
+            else
+              echo "::warning::⚠️ Unexpected response from Anthropic API (HTTP $HTTP_CODE)"
+              cat response.json
+              echo ""
+              echo "Continuing anyway, but review may fail..."
+            fi
+          fi
+          
+          # Clean up
+          rm -f response.json
+          
+          echo ""
+          echo "✅ API key verification complete!"
       
       - name: Build Context (Optional)
         continue-on-error: true
         run: |
-          if [ -f ".katich/context.json" ]; then
-            echo "✅ Using cached context"
-          else
-            echo "🔍 Building fresh context (this may take a while)..."
-            timeout 300 katich context build || echo "⚠️ Context build timeout or failed, continuing without context"
-          fi
+          echo "🔍 Building context for better review quality..."
+          # Add timeout to prevent hanging
+          timeout 300 katich context build || {
+            echo "⚠️ Context build timed out or failed - continuing without context"
+            echo "This is not critical, reviews will still work"
+          }
       
-      - name: Determine Review Parameters
-        id: review-params
+      - name: Verify Git Diff
+        id: verify-diff
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            REVIEW_TYPE="${{ inputs.review_type }}"
-          else
-            REVIEW_TYPE="diff"
-          fi
+          BASE_BRANCH="${{ github.event.pull_request.base.ref }}"
+          HEAD_BRANCH="origin/${{ github.event.pull_request.head.ref }}"
           
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            BASE_REF="${{ github.event.pull_request.base.ref }}"
-            HEAD_REF="origin/${{ github.event.pull_request.head.ref }}"
-          else
-            BASE_REF="${{ github.ref_name }}"
-            HEAD_REF="HEAD"
-          fi
+          echo "📊 Checking for changes between branches..."
+          echo "Comparing: $BASE_BRANCH..$HEAD_BRANCH"
           
-          echo "review_type=$REVIEW_TYPE" >> $GITHUB_OUTPUT
-          echo "base_ref=$BASE_REF" >> $GITHUB_OUTPUT
-          echo "head_ref=$HEAD_REF" >> $GITHUB_OUTPUT
-          
-          echo "📊 Review Parameters:"
-          echo "  Type: $REVIEW_TYPE"
-          echo "  Base: $BASE_REF"
-          echo "  Head: $HEAD_REF"
-      
-      - name: Verify Branches Exist
-        if: steps.review-params.outputs.review_type == 'diff'
-        run: |
-          BASE="${{ steps.review-params.outputs.base_ref }}"
-          HEAD="${{ steps.review-params.outputs.head_ref }}"
-          
-          echo "🔍 Verifying branches..."
-          
-          # Check if base exists
-          if git rev-parse "$BASE" >/dev/null 2>&1; then
-            echo "✅ Base branch exists: $BASE"
-            git log -1 "$BASE"
-          else
-            echo "❌ Base branch not found: $BASE"
-            echo "Available branches:"
-            git branch -a
+          # Verify both branches exist
+          if ! git rev-parse "$BASE_BRANCH" >/dev/null 2>&1; then
+            echo "::error::Base branch not found: $BASE_BRANCH"
             exit 1
           fi
           
-          # Check if head exists
-          if git rev-parse "$HEAD" >/dev/null 2>&1; then
-            echo "✅ Head branch exists: $HEAD"
-            git log -1 "$HEAD"
-          else
-            echo "❌ Head branch not found: $HEAD"
-            echo "Available refs:"
-            git show-ref
+          if ! git rev-parse "$HEAD_BRANCH" >/dev/null 2>&1; then
+            echo "::error::Head branch not found: $HEAD_BRANCH"
             exit 1
           fi
           
-          # Check if there are differences
-          DIFF_COUNT=$(git diff --name-only "$BASE".."$HEAD" | wc -l)
-          echo ""
-          echo "📊 Changes detected: $DIFF_COUNT files"
+          # Count changes
+          CHANGED_FILES=$(git diff --name-only "$BASE_BRANCH".."$HEAD_BRANCH" | wc -l)
+          echo "changes=$CHANGED_FILES" >> $GITHUB_OUTPUT
           
-          if [ "$DIFF_COUNT" -eq 0 ]; then
-            echo "⚠️ No changes detected between branches"
-            echo "This might indicate the branches are identical"
+          echo "✅ Found $CHANGED_FILES changed file(s)"
+          
+          if [ "$CHANGED_FILES" -eq 0 ]; then
+            echo "::warning::No file changes detected between branches"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
           else
-            echo "📝 Changed files:"
-            git diff --name-only "$BASE".."$HEAD" | head -20
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo ""
+            echo "📝 Changed files (first 10):"
+            git diff --name-only "$BASE_BRANCH".."$HEAD_BRANCH" | head -10
           fi
       
       - name: Run Katich Review
-        id: katich-review
+        if: steps.verify-diff.outputs.has_changes == 'true'
+        id: run-review
         continue-on-error: true
         run: |
-          REVIEW_TYPE="${{ steps.review-params.outputs.review_type }}"
-          BASE_REF="${{ steps.review-params.outputs.base_ref }}"
-          HEAD_REF="${{ steps.review-params.outputs.head_ref }}"
+          BASE_BRANCH="${{ github.event.pull_request.base.ref }}"
+          HEAD_BRANCH="origin/${{ github.event.pull_request.head.ref }}"
           
-          echo "🤖 Starting Katich Review..."
-          echo "Review type: $REVIEW_TYPE"
+          echo "🤖 Starting Katich AI Review..."
+          echo "📊 Review range: $BASE_BRANCH..$HEAD_BRANCH"
+          echo ""
           
-          # Set up output file
-          touch review_raw.txt
+          # Run review and capture all output
+          set +e  # Don't exit on error
+          katich review diff "$BASE_BRANCH".."$HEAD_BRANCH" 2>&1 | tee review_output.txt
+          REVIEW_EXIT_CODE=${PIPESTATUS[0]}
+          set -e
           
-          case $REVIEW_TYPE in
-            "diff")
-              echo "📊 Running diff review: $BASE_REF..$HEAD_REF"
-              katich review diff "$BASE_REF".."$HEAD_REF" 2>&1 | tee review_raw.txt
-              EXIT_CODE=${PIPESTATUS[0]}
-              ;;
-            "full")
-              echo "📊 Running full repository review"
-              katich review full 2>&1 | tee review_raw.txt
-              EXIT_CODE=${PIPESTATUS[0]}
-              ;;
-            "latest")
-              echo "📊 Running latest commit review"
-              katich review latest 2>&1 | tee review_raw.txt
-              EXIT_CODE=${PIPESTATUS[0]}
-              ;;
-            *)
-              echo "❌ Unknown review type: $REVIEW_TYPE"
-              EXIT_CODE=1
-              ;;
-          esac
+          echo ""
+          echo "review_exit_code=$REVIEW_EXIT_CODE" >> $GITHUB_OUTPUT
           
-          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
-          
-          # Display output
-          if [ -s review_raw.txt ]; then
-            echo "✅ Review output captured"
-            cat review_raw.txt
+          if [ $REVIEW_EXIT_CODE -eq 0 ]; then
+            echo "✅ Review completed successfully"
           else
-            echo "⚠️ No review output generated"
+            echo "⚠️ Review exited with code: $REVIEW_EXIT_CODE"
+            
+            # Check for specific error patterns
+            if grep -qi "api key\|authentication\|unauthorized" review_output.txt; then
+              echo "::error::API authentication failed. Please check your API key and credits."
+            elif grep -qi "timeout\|timed out" review_output.txt; then
+              echo "::error::Request timed out. The API provider may be slow or unavailable."
+            elif grep -qi "rate limit" review_output.txt; then
+              echo "::error::Rate limit exceeded. Please wait and try again."
+            elif grep -qi "no changes\|no files" review_output.txt; then
+              echo "::warning::No reviewable changes found."
+            else
+              echo "::error::Review failed. Check the output above for details."
+            fi
           fi
           
-          # Check for reports
+          # Check if reports were generated
           if [ -d ".katich/reports" ] && [ "$(ls -A .katich/reports 2>/dev/null)" ]; then
-            echo "✅ Reports generated:"
+            echo "✅ HTML reports generated:"
             ls -lh .katich/reports/
+            echo "has_reports=true" >> $GITHUB_OUTPUT
           else
-            echo "⚠️ No reports found in .katich/reports"
+            echo "⚠️ No HTML reports generated"
+            echo "has_reports=false" >> $GITHUB_OUTPUT
           fi
-          
-          exit $EXIT_CODE
       
-      - name: Handle Review Failure
-        if: steps.katich-review.outputs.exit_code != '0'
+      - name: Handle No Changes
+        if: steps.verify-diff.outputs.has_changes == 'false'
         run: |
-          echo "⚠️ Katich review encountered an error"
-          echo "Exit code: ${{ steps.katich-review.outputs.exit_code }}"
+          cat > review_output.txt << 'EOF'
+          ## ℹ️ No Changes to Review
           
-          # Check for common issues
-          if grep -q "API key" review_raw.txt 2>/dev/null; then
-            echo "::error::API key issue detected. Please verify your API key is correct and has sufficient credits."
-          elif grep -q "not found\|does not exist" review_raw.txt 2>/dev/null; then
-            echo "::error::Branch or file not found. Check that the branches exist."
-          elif grep -q "timeout\|connection" review_raw.txt 2>/dev/null; then
-            echo "::error::Network or timeout issue. The API provider might be unavailable."
-          fi
-          
-          # Create a basic error report
-          cat > review.md << 'EOF'
-          ## ⚠️ Review Error
-          
-          The Katich AI review encountered an error during execution.
-          
-          **Please check:**
-          - API key is valid and has credits
-          - Network connectivity to API provider
-          - Branch references are correct
-          - Repository has commits to review
-          
-          See the workflow logs for detailed error information.
+          No file changes were detected between the base and head branches.
+          This PR may only contain merge commits or identical content.
           EOF
+          
+          echo "ℹ️ No changes to review - skipping analysis"
       
-      - name: Parse Review Results
-        if: steps.katich-review.outputs.exit_code == '0'
-        id: parse-results
+      - name: Move Reports to Comments Directory
+        if: steps.run-review.outputs.has_reports == 'true'
         run: |
-          # Create formatted review if raw output exists
-          if [ -s review_raw.txt ]; then
-            cp review_raw.txt review.md
-          else
-            echo "No review content" > review.md
-          fi
-          
-          # Count issues
-          CRITICAL=$(grep -c "🔴" review.md 2>/dev/null || echo "0")
-          WARNING=$(grep -c "🟡" review.md 2>/dev/null || echo "0")
-          SECURITY=$(grep -c "\[SECURITY\]" review.md 2>/dev/null || echo "0")
-          
-          echo "critical=$CRITICAL" >> $GITHUB_OUTPUT
-          echo "warning=$WARNING" >> $GITHUB_OUTPUT
-          echo "security=$SECURITY" >> $GITHUB_OUTPUT
-          
-          echo "📊 Review Statistics:"
-          echo "  🔴 Critical: $CRITICAL"
-          echo "  🟡 Warnings: $WARNING"
-          echo "  🛡️ Security: $SECURITY"
+          mkdir -p comments
+          mv .katich/reports/* comments/ 2>/dev/null || true
+          echo "✅ Reports moved to comments directory"
+          ls -la comments/
       
       - name: Generate PR Comment
         if: always()
         run: |
-          if [ "${{ steps.katich-review.outputs.exit_code }}" = "0" ]; then
+          if [ "${{ steps.verify-diff.outputs.has_changes }}" = "false" ]; then
+            # No changes case
             cat > pr_comment.md << 'EOF'
-          ## 🤖 Katich AI Code Review Results
+          ## 🤖 Katich AI Code Review
           
-          ### 📊 Summary
-          - 🔴 **Critical Issues**: ${{ steps.parse-results.outputs.critical || '0' }}
-          - 🟡 **Warnings**: ${{ steps.parse-results.outputs.warning || '0' }}
-          - 🛡️ **Security Issues**: ${{ steps.parse-results.outputs.security || '0' }}
+          ### ℹ️ No Changes Detected
           
-          ### 📝 Detailed Review
+          No file changes were found between the base and head branches.
+          This may occur if:
+          - The PR only contains merge commits
+          - The branches have identical content
+          - All changes are in ignored files
+          
+          ---
+          *Generated by [Katich AI](https://github.com/kodehash/katichai-dist)*
+          EOF
+          
+          elif [ "${{ steps.run-review.outputs.review_exit_code }}" = "0" ]; then
+            # Success case
+            cat > pr_comment.md << 'EOF'
+          ## 🤖 Katich AI Code Review
+          
+          ### Review Summary
+          
           EOF
             
-            if [ -f "review.md" ]; then
-              cat review.md >> pr_comment.md
+            # Add the review output
+            if [ -f "review_output.txt" ]; then
+              echo '```' >> pr_comment.md
+              cat review_output.txt >> pr_comment.md
+              echo '```' >> pr_comment.md
             fi
-          else
-            cat > pr_comment.md << 'EOF'
-          ## ⚠️ Katich AI Review Error
-          
-          The automated code review encountered an error and could not complete.
-          
-          **Common issues:**
-          - Invalid or expired API key
-          - Insufficient API credits
-          - Network connectivity problems
-          - No changes detected between branches
-          
-          Please check the [workflow logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.
-          
-          You can also run the review manually:
-          ```bash
-          katich review diff ${{ steps.review-params.outputs.base_ref }}..${{ steps.review-params.outputs.head_ref }}
-          ```
-          EOF
-          fi
-          
-          cat >> pr_comment.md << 'EOF'
+            
+            cat >> pr_comment.md << 'EOF'
           
           ---
           
-          <details>
-          <summary>ℹ️ Review Information</summary>
-          
-          - **Review Type**: ${{ steps.review-params.outputs.review_type }}
-          - **Base Branch**: ${{ steps.review-params.outputs.base_ref }}
-          - **Head Branch**: ${{ steps.review-params.outputs.head_ref }}
-          - **Commit**: `${{ github.sha }}`
-          - **Status**: ${{ steps.katich-review.outputs.exit_code == '0' && '✅ Success' || '❌ Failed' }}
+          ### 📦 Detailed Reports
+          Download the full HTML report from the workflow artifacts for detailed analysis.
           
           *Generated by [Katich AI](https://github.com/kodehash/katichai-dist)*
-          </details>
           EOF
+          
+          else
+            # Failure case
+            cat > pr_comment.md << 'EOF'
+          ## ⚠️ Katich AI Code Review - Error
+          
+          The code review encountered an error and could not complete successfully.
+          
+          ### Common Issues and Solutions:
+          
+          1. **API Key Problems**
+             - Verify your API key is correct in repository secrets
+             - Check that your API account has sufficient credits
+             - Ensure the key has not expired
+          
+          2. **Network Issues**
+             - The API provider may be experiencing downtime
+             - Rate limits may have been exceeded
+          
+          3. **Configuration Issues**
+             - Check that branches exist and are accessible
+             - Verify repository permissions
+          
+          ### Next Steps:
+          - Check the [workflow logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for detailed error messages
+          - Try re-running the workflow
+          - Test locally: `katich review diff ${{ github.event.pull_request.base.ref }}..origin/${{ github.event.pull_request.head.ref }}`
+          
+          ---
+          
+          *Generated by [Katich AI](https://github.com/kodehash/katichai-dist)*
+          EOF
+          fi
+          
+          echo "✅ PR comment generated"
       
-      - name: Post/Update PR Comment
-        if: github.event_name == 'pull_request'
+      - name: Post Review as PR Comment
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -402,72 +386,96 @@ jobs:
             const fs = require('fs');
             const commentBody = fs.readFileSync('pr_comment.md', 'utf8');
             
-            const { data: comments } = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-            });
-            
-            const botComment = comments.find(comment => 
-              comment.body.includes('🤖 Katich AI Code Review Results') ||
-              comment.body.includes('⚠️ Katich AI Review Error')
-            );
-            
-            if (botComment) {
-              await github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: botComment.id,
-                body: commentBody
-              });
-              console.log('✅ Updated existing comment');
-            } else {
-              await github.rest.issues.createComment({
+            try {
+              // Find existing Katich comment
+              const { data: comments } = await github.rest.issues.listComments({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: context.issue.number,
-                body: commentBody
               });
-              console.log('✅ Created new comment');
+              
+              const katichComment = comments.find(comment => 
+                comment.body.includes('🤖 Katich AI Code Review')
+              );
+              
+              if (katichComment) {
+                // Update existing comment
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: katichComment.id,
+                  body: commentBody
+                });
+                console.log('✅ Updated existing Katich comment');
+              } else {
+                // Create new comment
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.issue.number,
+                  body: commentBody
+                });
+                console.log('✅ Posted new Katich comment');
+              }
+            } catch (error) {
+              console.error('❌ Failed to post comment:', error.message);
+              core.setFailed('Failed to post PR comment');
             }
       
-      - name: Upload Reports and Logs
+      - name: Upload Artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: katich-review-output-${{ github.sha }}
+          name: katich-review-report-${{ github.event.pull_request.number }}
           path: |
-            .katich/reports/**/*
-            review.md
-            review_raw.txt
+            comments/*.html
+            review_output.txt
             pr_comment.md
             .katich/config.yaml
-          retention-days: 90
+          retention-days: 30
           if-no-files-found: warn
       
-      - name: Summary
+      - name: Check for Critical Issues
+        if: steps.run-review.outputs.review_exit_code == '0'
+        run: |
+          if [ -f "review_output.txt" ]; then
+            # Look for security issues
+            if grep -q "🔴.*\[SECURITY\]" review_output.txt; then
+              echo "::warning::⚠️ Critical security issues found! Please review before merging."
+            fi
+            
+            # Count critical issues
+            CRITICAL_COUNT=$(grep -c "🔴" review_output.txt || echo "0")
+            if [ "$CRITICAL_COUNT" -gt 0 ]; then
+              echo "::notice::Found $CRITICAL_COUNT critical issue(s) - please review"
+            fi
+          fi
+      
+      - name: Workflow Summary
         if: always()
         run: |
-          echo "## 🎯 Katich Review Summary" >> $GITHUB_STEP_SUMMARY
+          echo "## 🎯 Katich AI Review Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
-          if [ "${{ steps.katich-review.outputs.exit_code }}" = "0" ]; then
+          if [ "${{ steps.verify-diff.outputs.has_changes }}" = "false" ]; then
+            echo "### ℹ️ No Changes to Review" >> $GITHUB_STEP_SUMMARY
+            echo "No file changes detected between branches." >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ steps.run-review.outputs.review_exit_code }}" = "0" ]; then
             echo "### ✅ Review Completed Successfully" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "**Results:**" >> $GITHUB_STEP_SUMMARY
-            echo "- 🔴 Critical Issues: ${{ steps.parse-results.outputs.critical || '0' }}" >> $GITHUB_STEP_SUMMARY
-            echo "- 🟡 Warnings: ${{ steps.parse-results.outputs.warning || '0' }}" >> $GITHUB_STEP_SUMMARY
-            echo "- 🛡️ Security Issues: ${{ steps.parse-results.outputs.security || '0' }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Changed Files**: ${{ steps.verify-diff.outputs.changes }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Reports Generated**: ${{ steps.run-review.outputs.has_reports == 'true' && 'Yes' || 'No' }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **PR Comment**: Posted" >> $GITHUB_STEP_SUMMARY
           else
             echo "### ❌ Review Failed" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "**Exit Code:** ${{ steps.katich-review.outputs.exit_code }}" >> $GITHUB_STEP_SUMMARY
+            echo "Exit code: ${{ steps.run-review.outputs.review_exit_code }}" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Please check the workflow logs for details." >> $GITHUB_STEP_SUMMARY
+            echo "Check the workflow logs and PR comment for details." >> $GITHUB_STEP_SUMMARY
           fi
           
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Configuration:**" >> $GITHUB_STEP_SUMMARY
-          echo "- Review Type: ${{ steps.review-params.outputs.review_type }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Base: ${{ steps.review-params.outputs.base_ref }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Head: ${{ steps.review-params.outputs.head_ref }}" >> $GITHUB_STEP_SUMMARY
+          echo "### 📋 Configuration" >> $GITHUB_STEP_SUMMARY
+          echo "- **Base Branch**: ${{ github.event.pull_request.base.ref }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Head Branch**: ${{ github.event.pull_request.head.ref }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **PR Number**: #${{ github.event.pull_request.number }}" >> $GITHUB_STEP_SUMMARY
