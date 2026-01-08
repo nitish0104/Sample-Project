@@ -386,30 +386,233 @@ jobs:
           EOF
           
           elif [ "${{ steps.run-review.outputs.review_exit_code }}" = "0" ]; then
-            # Success case
-            cat > pr_comment.md << 'EOF'
+            # Success case - Extract data from HTML report
+            HTML_REPORT=$(find .katich/reports -name "*.html" -type f | head -1)
+            
+            if [ -f "$HTML_REPORT" ]; then
+              echo "📄 Found HTML report: $HTML_REPORT"
+              
+              # Extract summary from HTML
+              SUMMARY=$(grep -A 50 '<div class="summary">' "$HTML_REPORT" | grep -o '<p>.*</p>' | sed 's/<[^>]*>//g' | head -1 || echo "No summary available")
+              
+              # Extract token usage
+              TOKENS=$(grep -o 'Tokens:.*total' "$HTML_REPORT" | sed 's/<[^>]*>//g' | head -1 || echo "")
+              
+              # Count critical issues
+              CRITICAL_COUNT=$(grep -c 'class="issue critical"' "$HTML_REPORT" 2>/dev/null || echo "0")
+              WARNING_COUNT=$(grep -c 'class="issue warning"' "$HTML_REPORT" 2>/dev/null || echo "0")
+              
+              # Extract file sampling info
+              FILES_REVIEWED=$(grep -o 'Reviewing:.*files' "$HTML_REPORT" | sed 's/<[^>]*>//g' | head -1 || echo "")
+              
+              # Start building the comment
+              cat > pr_comment.md << EOF
+          ## 🤖 Katich AI Code Review Report
+          
+          ### 📊 Overview
+          
+          | Metric | Value |
+          |--------|-------|
+          | 📝 Files Reviewed | $FILES_REVIEWED |
+          | 🔴 Critical Issues | $CRITICAL_COUNT |
+          | 🟡 Warnings | $WARNING_COUNT |
+          | 💰 Token Usage | $TOKENS |
+          
+          ---
+          
+          ### 📌 Summary
+          
+          $SUMMARY
+          
+          ---
+          
+          EOF
+              
+              # Extract and display critical issues
+              if [ "$CRITICAL_COUNT" -gt 0 ] || [ "$WARNING_COUNT" -gt 0 ]; then
+                echo "### ⚠️ Issues Found" >> pr_comment.md
+                echo "" >> pr_comment.md
+                
+                # Extract issues from review_output.txt (better formatted)
+                if [ -f "review_output.txt" ]; then
+                  if grep -q "⚠️.*CRITICAL ISSUES" review_output.txt; then
+                    echo "#### Critical Issues" >> pr_comment.md
+                    echo "" >> pr_comment.md
+                    sed -n '/⚠️.*CRITICAL ISSUES/,/^💡\|^✅\|^📊\|^🔧\|^🔄/p' review_output.txt | \
+                      grep -v "⚠️.*CRITICAL ISSUES" | \
+                      grep -v "^💡\|^✅\|^📊\|^🔧\|^🔄" | \
+                      grep -v "^$" | \
+                      sed 's/^//' >> pr_comment.md
+                    echo "" >> pr_comment.md
+                  fi
+                fi
+              else
+                echo "### ✅ No Issues Found" >> pr_comment.md
+                echo "" >> pr_comment.md
+                echo "Great work! No critical issues or warnings detected. 🎉" >> pr_comment.md
+                echo "" >> pr_comment.md
+              fi
+              
+              # Extract suggestions
+              if [ -f "review_output.txt" ] && grep -q "💡 SUGGESTIONS" review_output.txt; then
+                echo "---" >> pr_comment.md
+                echo "" >> pr_comment.md
+                echo "### 💡 Suggestions" >> pr_comment.md
+                echo "" >> pr_comment.md
+                sed -n '/💡 SUGGESTIONS/,/^⚠️\|^✅\|^📊\|^🔧\|^🔄/p' review_output.txt | \
+                  grep -v "💡 SUGGESTIONS" | \
+                  grep -v "^⚠️\|^✅\|^📊\|^🔧\|^🔄" | \
+                  grep -v "^$" | \
+                  sed 's/^//' >> pr_comment.md
+                echo "" >> pr_comment.md
+              fi
+              
+              # Add collapsible sections for advanced analysis
+              echo "---" >> pr_comment.md
+              echo "" >> pr_comment.md
+              echo "### 📊 Detailed Analysis" >> pr_comment.md
+              echo "" >> pr_comment.md
+              
+              # Static Analysis section
+              if [ -f "review_output.txt" ] && grep -q "📊 STATIC ANALYSIS" review_output.txt; then
+                echo "<details>" >> pr_comment.md
+                echo "<summary>📊 Static Analysis</summary>" >> pr_comment.md
+                echo "" >> pr_comment.md
+                echo "\`\`\`" >> pr_comment.md
+                sed -n '/📊 STATIC ANALYSIS/,/^⚠️\|^✅\|^💡\|^🔧\|^🔄\|^🤖/p' review_output.txt | \
+                  grep -v "📊 STATIC ANALYSIS" | \
+                  grep -v "^⚠️\|^✅\|^💡\|^🔧\|^🔄\|^🤖" | \
+                  sed 's/\x1b\[[0-9;]*m//g' >> pr_comment.md
+                echo "\`\`\`" >> pr_comment.md
+                echo "</details>" >> pr_comment.md
+                echo "" >> pr_comment.md
+              fi
+              
+              # Duplicate Code section
+              if [ -f "review_output.txt" ] && grep -q "🔄 DUPLICATE CODE" review_output.txt; then
+                echo "<details>" >> pr_comment.md
+                echo "<summary>🔄 Duplicate Code Detection</summary>" >> pr_comment.md
+                echo "" >> pr_comment.md
+                echo "\`\`\`" >> pr_comment.md
+                sed -n '/🔄 DUPLICATE CODE/,/^⚠️\|^✅\|^💡\|^📊\|^🔧\|^🤖/p' review_output.txt | \
+                  grep -v "🔄 DUPLICATE CODE" | \
+                  grep -v "^⚠️\|^✅\|^💡\|^📊\|^🔧\|^🤖" | \
+                  sed 's/\x1b\[[0-9;]*m//g' >> pr_comment.md
+                echo "\`\`\`" >> pr_comment.md
+                echo "</details>" >> pr_comment.md
+                echo "" >> pr_comment.md
+              fi
+              
+              # AI-Generated Code section
+              if [ -f "review_output.txt" ] && grep -q "🤖 AI-GENERATED CODE" review_output.txt; then
+                echo "<details>" >> pr_comment.md
+                echo "<summary>🤖 AI-Generated Code Analysis</summary>" >> pr_comment.md
+                echo "" >> pr_comment.md
+                echo "\`\`\`" >> pr_comment.md
+                sed -n '/🤖 AI-GENERATED CODE/,/^⚠️\|^✅\|^💡\|^📊\|^🔧\|^🔄/p' review_output.txt | \
+                  grep -v "🤖 AI-GENERATED CODE" | \
+                  grep -v "^⚠️\|^✅\|^💡\|^📊\|^🔧\|^🔄" | \
+                  sed 's/\x1b\[[0-9;]*m//g' >> pr_comment.md
+                echo "\`\`\`" >> pr_comment.md
+                echo "</details>" >> pr_comment.md
+                echo "" >> pr_comment.md
+              fi
+              
+              # Complexity section
+              if [ -f "review_output.txt" ] && grep -q "🔧 UNNECESSARY COMPLEXITY" review_output.txt; then
+                echo "<details>" >> pr_comment.md
+                echo "<summary>🔧 Code Complexity Analysis</summary>" >> pr_comment.md
+                echo "" >> pr_comment.md
+                echo "\`\`\`" >> pr_comment.md
+                sed -n '/🔧 UNNECESSARY COMPLEXITY/,/^⚠️\|^✅\|^💡\|^📊\|^🔄\|^🤖/p' review_output.txt | \
+                  grep -v "🔧 UNNECESSARY COMPLEXITY" | \
+                  grep -v "^⚠️\|^✅\|^💡\|^📊\|^🔄\|^🤖" | \
+                  sed 's/\x1b\[[0-9;]*m//g' >> pr_comment.md
+                echo "\`\`\`" >> pr_comment.md
+                echo "</details>" >> pr_comment.md
+                echo "" >> pr_comment.md
+              fi
+              
+              # Add full HTML report section
+              cat >> pr_comment.md << 'ENDOFCOMMENT'
+          ---
+          
+          ### 📄 Full Interactive Report
+          
+          <details>
+          <summary>🎨 Click to view complete HTML report details</summary>
+          
+          The complete interactive HTML report includes:
+          
+          #### 📊 Dashboard Features
+          - **Interactive Metrics** - Visual charts and graphs
+          - **File Navigation** - Quick jump to any file
+          - **Syntax Highlighting** - Color-coded code snippets
+          - **Search Functionality** - Find specific issues
+          
+          #### 🔍 Detailed Sections
+          - **File Sampling** - Which files were analyzed
+          - **Critical Issues** - Full context and code snippets  
+          - **Suggestions** - Detailed improvement recommendations
+          - **Duplicate Code** - Side-by-side comparisons
+          - **Static Analysis** - Complete metrics breakdown
+          - **AI Detection** - Function-level analysis
+          
+          #### 💾 How to Access
+          1. Go to the [**Actions tab**](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          2. Scroll to **Artifacts** section
+          3. Download `katich-review-report-${{ github.event.pull_request.number }}`
+          4. Open the HTML file in your browser
+          
+          </details>
+          
+          ---
+          
+          <details>
+          <summary>ℹ️ Review Configuration</summary>
+          
+          | Setting | Value |
+          |---------|-------|
+          | **Model** | GPT-4o (128K context) |
+          | **Base Branch** | `${{ github.event.pull_request.base.ref }}` |
+          | **Head Branch** | `${{ github.event.pull_request.head.ref }}` |
+          | **Commit** | `${{ github.sha }}` |
+          | **Files Changed** | ${{ steps.verify-diff.outputs.changes }} |
+          
+          </details>
+          
+          ---
+          
+          <div align="center">
+          
+          *🤖 Generated by [Katich AI](https://github.com/kodehash/katichai-dist)*
+          
+          *📊 [View Workflow Logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) • ⚙️ [Configure Settings](https://github.com/${{ github.repository }}/blob/main/.github/workflows)*
+          
+          </div>
+          ENDOFCOMMENT
+              
+            else
+              # Fallback if HTML not found - use text output
+              cat > pr_comment.md << 'EOF'
           ## 🤖 Katich AI Code Review
           
           ### Review Summary
           
           EOF
-            
-            # Add the review output
-            if [ -f "review_output.txt" ]; then
-              echo '```' >> pr_comment.md
-              cat review_output.txt >> pr_comment.md
-              echo '```' >> pr_comment.md
-            fi
-            
-            cat >> pr_comment.md << 'EOF'
+              
+              if [ -f "review_output.txt" ]; then
+                echo '```' >> pr_comment.md
+                cat review_output.txt >> pr_comment.md
+                echo '```' >> pr_comment.md
+              fi
+              
+              cat >> pr_comment.md << 'EOF'
           
           ---
-          
-          ### 📦 Detailed Reports
-          Download the full HTML report from the workflow artifacts for detailed analysis.
-          
           *Generated by [Katich AI](https://github.com/kodehash/katichai-dist)*
           EOF
+            fi
           
           else
             # Failure case
