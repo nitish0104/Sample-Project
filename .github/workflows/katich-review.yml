@@ -386,29 +386,161 @@ jobs:
           EOF
           
           elif [ "${{ steps.run-review.outputs.review_exit_code }}" = "0" ]; then
-            # Success case
+            # Success case - Parse and format the review output
             cat > pr_comment.md << 'EOF'
-          ## 🤖 Katich AI Code Review
-          
-          ### Review Summary
+          ## 🤖 Katich AI Code Review Report
           
           EOF
             
-            # Add the review output
+            # Extract key information from review output
             if [ -f "review_output.txt" ]; then
-              echo '```' >> pr_comment.md
-              cat review_output.txt >> pr_comment.md
-              echo '```' >> pr_comment.md
+              # Extract Summary
+              if grep -q "📌 SUMMARY" review_output.txt; then
+                echo "### 📌 Summary" >> pr_comment.md
+                echo "" >> pr_comment.md
+                sed -n '/📌 SUMMARY/,/^⚠️\|^✅\|^💡\|^📊\|^🔧\|^🔄/p' review_output.txt | \
+                  grep -v "📌 SUMMARY" | \
+                  grep -v "^⚠️\|^✅\|^💡\|^📊\|^🔧\|^🔄" | \
+                  sed 's/^//' >> pr_comment.md
+                echo "" >> pr_comment.md
+              fi
+              
+              # Extract Token Usage
+              if grep -q "📊 Tokens:" review_output.txt; then
+                TOKENS=$(grep "📊 Tokens:" review_output.txt | head -1)
+                echo "<details>" >> pr_comment.md
+                echo "<summary>📊 Token Usage</summary>" >> pr_comment.md
+                echo "" >> pr_comment.md
+                echo "\`\`\`" >> pr_comment.md
+                echo "$TOKENS" | sed 's/\x1b\[[0-9;]*m//g' >> pr_comment.md
+                echo "\`\`\`" >> pr_comment.md
+                echo "</details>" >> pr_comment.md
+                echo "" >> pr_comment.md
+              fi
+              
+              # Extract Critical Issues
+              if grep -q "⚠️  CRITICAL ISSUES\|⚠️ CRITICAL ISSUES" review_output.txt; then
+                echo "### ⚠️ Critical Issues" >> pr_comment.md
+                echo "" >> pr_comment.md
+                sed -n '/⚠️.*CRITICAL ISSUES/,/^💡\|^✅\|^📊\|^🔧\|^🔄/p' review_output.txt | \
+                  grep -v "⚠️.*CRITICAL ISSUES" | \
+                  grep -v "^💡\|^✅\|^📊\|^🔧\|^🔄" | \
+                  sed 's/^//' >> pr_comment.md
+                echo "" >> pr_comment.md
+              elif grep -q "✅ No critical issues found" review_output.txt; then
+                echo "### ✅ Critical Issues" >> pr_comment.md
+                echo "" >> pr_comment.md
+                echo "No critical issues found! 🎉" >> pr_comment.md
+                echo "" >> pr_comment.md
+              fi
+              
+              # Extract Suggestions
+              if grep -q "💡 SUGGESTIONS" review_output.txt; then
+                echo "### 💡 Suggestions" >> pr_comment.md
+                echo "" >> pr_comment.md
+                sed -n '/💡 SUGGESTIONS/,/^⚠️\|^✅\|^📊\|^🔧\|^🔄/p' review_output.txt | \
+                  grep -v "💡 SUGGESTIONS" | \
+                  grep -v "^⚠️\|^✅\|^📊\|^🔧\|^🔄" | \
+                  sed 's/^//' >> pr_comment.md
+                echo "" >> pr_comment.md
+              fi
+              
+              # Extract Duplicate Code section
+              if grep -q "🔄 DUPLICATE CODE" review_output.txt; then
+                echo "<details>" >> pr_comment.md
+                echo "<summary>🔄 Duplicate Code Analysis</summary>" >> pr_comment.md
+                echo "" >> pr_comment.md
+                echo "\`\`\`" >> pr_comment.md
+                sed -n '/🔄 DUPLICATE CODE/,/^⚠️\|^✅\|^💡\|^📊\|^🔧/p' review_output.txt | \
+                  grep -v "🔄 DUPLICATE CODE" | \
+                  grep -v "^⚠️\|^✅\|^💡\|^📊\|^🔧" | \
+                  sed 's/\x1b\[[0-9;]*m//g' >> pr_comment.md
+                echo "\`\`\`" >> pr_comment.md
+                echo "</details>" >> pr_comment.md
+                echo "" >> pr_comment.md
+              fi
+              
+              # Extract Static Analysis section
+              if grep -q "📊 STATIC ANALYSIS" review_output.txt; then
+                echo "<details>" >> pr_comment.md
+                echo "<summary>📊 Static Analysis</summary>" >> pr_comment.md
+                echo "" >> pr_comment.md
+                echo "\`\`\`" >> pr_comment.md
+                sed -n '/📊 STATIC ANALYSIS/,/^⚠️\|^✅\|^💡\|^🔧\|^🔄/p' review_output.txt | \
+                  grep -v "📊 STATIC ANALYSIS" | \
+                  grep -v "^⚠️\|^✅\|^💡\|^🔧\|^🔄" | \
+                  sed 's/\x1b\[[0-9;]*m//g' >> pr_comment.md
+                echo "\`\`\`" >> pr_comment.md
+                echo "</details>" >> pr_comment.md
+                echo "" >> pr_comment.md
+              fi
+              
+              # Extract AI-Generated Code Analysis
+              if grep -q "🤖 AI-GENERATED CODE ANALYSIS" review_output.txt; then
+                echo "<details>" >> pr_comment.md
+                echo "<summary>🤖 AI-Generated Code Analysis</summary>" >> pr_comment.md
+                echo "" >> pr_comment.md
+                echo "\`\`\`" >> pr_comment.md
+                sed -n '/🤖 AI-GENERATED CODE ANALYSIS/,/^⚠️\|^✅\|^💡\|^📊\|^🔧\|^🔄/p' review_output.txt | \
+                  grep -v "🤖 AI-GENERATED CODE ANALYSIS" | \
+                  grep -v "^⚠️\|^✅\|^💡\|^📊\|^🔧\|^🔄" | \
+                  sed 's/\x1b\[[0-9;]*m//g' >> pr_comment.md
+                echo "\`\`\`" >> pr_comment.md
+                echo "</details>" >> pr_comment.md
+                echo "" >> pr_comment.md
+              fi
+              
+              # Extract Unnecessary Complexity
+              if grep -q "🔧 UNNECESSARY COMPLEXITY" review_output.txt; then
+                echo "<details>" >> pr_comment.md
+                echo "<summary>🔧 Unnecessary Complexity</summary>" >> pr_comment.md
+                echo "" >> pr_comment.md
+                echo "\`\`\`" >> pr_comment.md
+                sed -n '/🔧 UNNECESSARY COMPLEXITY/,/^⚠️\|^✅\|^💡\|^📊\|^🔄/p' review_output.txt | \
+                  grep -v "🔧 UNNECESSARY COMPLEXITY" | \
+                  grep -v "^⚠️\|^✅\|^💡\|^📊\|^🔄" | \
+                  sed 's/\x1b\[[0-9;]*m//g' >> pr_comment.md
+                echo "\`\`\`" >> pr_comment.md
+                echo "</details>" >> pr_comment.md
+                echo "" >> pr_comment.md
+              fi
             fi
             
+            # Add link to HTML report
             cat >> pr_comment.md << 'EOF'
           
           ---
           
-          ### 📦 Detailed Reports
-          Download the full HTML report from the workflow artifacts for detailed analysis.
+          ### 📦 Detailed HTML Report
           
-          *Generated by [Katich AI](https://github.com/kodehash/katichai-dist)*
+          📄 A comprehensive HTML report with interactive features is available in the workflow artifacts:
+          
+          1. Go to the [**Actions tab**](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          2. Scroll down to **Artifacts** section
+          3. Download **katich-review-report-${{ github.event.pull_request.number }}**
+          4. Extract and open the HTML file in your browser
+          
+          The HTML report includes:
+          - 🎨 Interactive dashboard with metrics
+          - 📊 Detailed code analysis with syntax highlighting
+          - 🔄 Side-by-side duplicate code comparisons
+          - 📈 Complexity visualizations
+          - 🔍 Function-level breakdown
+          
+          ---
+          
+          <details>
+          <summary>ℹ️ Review Information</summary>
+          
+          - **Model**: GPT-4o
+          - **Base Branch**: ${{ github.event.pull_request.base.ref }}
+          - **Head Branch**: ${{ github.event.pull_request.head.ref }}
+          - **Files Reviewed**: ${{ steps.verify-diff.outputs.changes }}
+          - **Commit**: `${{ github.sha }}`
+          
+          </details>
+          
+          *Generated by [Katich AI](https://github.com/kodehash/katichai-dist) • [View Logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*
           EOF
           
           else
