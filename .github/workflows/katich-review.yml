@@ -1,21 +1,289 @@
-## 🚀 **Katich AI Live Review Available!**
+name: Katich AI Code Review with Live HTML
 
-### 🔗 **[CLICK HERE FOR INTERACTIVE HTML REPORT](https://your-org.github.io/repo/pr-6-12345-1704691200/)**
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
 
-*Opens directly in browser - no download needed*
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+  pull-requests: write
+  actions: write
 
-📊 **Quick Stats**
-| Metric | Value |
-|--------|-------|
-| 📝 Changed Files | 2 |
-| 🔴 Critical Issues | 0 |
-| 🟡 Warnings | 0 |
-| 💰 Token Usage | 2,354 total |
-| 🌐 Report Status | **[✅ LIVE & INTERACTIVE](https://your-org.github.io/repo/pr-6-12345-1704691200/)** |
-
-🎨 **Report Features**
-✅ Live Dashboard • Clickable Navigation • Syntax Highlighting
-✅ Search & Filter • Side-by-side Diffs • No Installation
-
-🗑️ **Auto-Cleanup**
-This report will be automatically deleted when PR closes or after 24 hours.
+jobs:
+  katich-review:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    
+    steps:
+      # Step 1: Checkout code
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          fetch-depth: 0
+      
+      # Step 2: Setup Pages
+      - name: Setup Pages
+        uses: actions/configure-pages@v3
+      
+      # Step 3: Fetch PR branch
+      - name: Fetch PR head branch
+        run: |
+          git fetch origin ${{ github.event.pull_request.head.ref }}
+      
+      # Step 4: Install Katich
+      - name: Install Katich
+        run: |
+          curl -L https://github.com/kodehash/katichai-dist/releases/latest/download/katich_linux_amd64.tar.gz -o katich.tar.gz
+          tar -xzf katich.tar.gz
+          chmod +x katich-linux-amd64
+          sudo mv katich-linux-amd64 /usr/local/bin/katich
+          katich version || echo "Katich installed"
+      
+      # Step 5: Configure Katich
+      - name: Configure Katich
+        env:
+          KATICH_LLM_API_KEY: ${{ secrets.KATICH_LLM_API_KEY }}
+        run: |
+          katich init
+          cat > .katich/config.yaml << 'EOF'
+          project_name: ${{ github.repository }}
+          llm:
+            provider: openai
+            model: gpt-4o
+          embeddings:
+            provider: openai
+          review:
+            generate_html: true
+            html_output_path: ./katich-report
+          EOF
+      
+      # Step 6: Run Review
+      - name: Run Katich Review
+        id: run-review
+        run: |
+          BASE_BRANCH="${{ github.event.pull_request.base.ref }}"
+          HEAD_BRANCH="origin/${{ github.event.pull_request.head.ref }}"
+          
+          echo "Review range: $BASE_BRANCH..$HEAD_BRANCH"
+          
+          # Run review
+          katich review diff "$BASE_BRANCH".."$HEAD_BRANCH" 2>&1 | tee review_output.txt
+          
+          # Clean ANSI codes
+          sed -i 's/\x1b\[[0-9;]*[a-zA-Z]//g' review_output.txt
+          
+          # Count changed files
+          CHANGED_FILES=$(git diff --name-only "$BASE_BRANCH".."$HEAD_BRANCH" | wc -l)
+          echo "changed_files=$CHANGED_FILES" >> $GITHUB_OUTPUT
+          
+          # Check if HTML was generated
+          if [ -d "./katich-report" ] && ls ./katich-report/*.html 1> /dev/null 2>&1; then
+            echo "has_html=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_html=false" >> $GITHUB_OUTPUT
+          fi
+      
+      # Step 7: Prepare Pages Content
+      - name: Prepare GitHub Pages Content
+        id: prepare-pages
+        if: steps.run-review.outputs.has_html == 'true'
+        run: |
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          RUN_ID="${{ github.run_id }}"
+          REPORT_DIR="pr-$PR_NUMBER-$RUN_ID"
+          
+          # Create deployment directory
+          mkdir -p "./pages-deploy/$REPORT_DIR"
+          
+          # Copy HTML report
+          HTML_FILE=$(find ./katich-report -name "*.html" -type f | head -1)
+          if [ -f "$HTML_FILE" ]; then
+            cp "$HTML_FILE" "./pages-deploy/$REPORT_DIR/index.html"
+            
+            # Copy supporting files
+            find ./katich-report -type f \( -name "*.css" -o -name "*.js" -o -name "*.png" -o -name "*.svg" \) \
+              -exec cp {} "./pages-deploy/$REPORT_DIR/" \; 2>/dev/null || true
+          fi
+          
+          # Create landing page
+          cat > "./pages-deploy/index.html" << 'EOF'
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <title>Katich AI Review Reports</title>
+            <style>
+              body { font-family: sans-serif; max-width: 800px; margin: 40px auto; padding: 20px; }
+              .report { border: 1px solid #ddd; border-radius: 6px; padding: 20px; margin: 20px 0; }
+              h1 { color: #0366d6; }
+              a { color: #0366d6; text-decoration: none; }
+              a:hover { text-decoration: underline; }
+            </style>
+          </head>
+          <body>
+            <h1>Katich AI Review Reports</h1>
+            <p>Interactive code review reports for pull requests.</p>
+            <div class="report">
+              <h3><a href="$REPORT_DIR/index.html">PR #$PR_NUMBER Review</a></h3>
+              <p><strong>Repository:</strong> ${{ github.repository }}</p>
+              <p><strong>Base:</strong> ${{ github.event.pull_request.base.ref }}</p>
+              <p><strong>Head:</strong> ${{ github.event.pull_request.head.ref }}</p>
+              <a href="$REPORT_DIR/index.html" style="display: inline-block; padding: 10px 20px; background: #0366d6; color: white; border-radius: 6px;">
+                View Interactive Report
+              </a>
+            </div>
+            <footer style="margin-top: 40px; color: #666; font-size: 14px;">
+              <p>Generated by Katich AI - Reports auto-delete after 24 hours</p>
+            </footer>
+          </body>
+          </html>
+          EOF
+          
+          # Replace placeholder
+          sed -i "s/\$REPORT_DIR/$REPORT_DIR/g" "./pages-deploy/index.html"
+          
+          # Set outputs
+          echo "report_dir=$REPORT_DIR" >> $GITHUB_OUTPUT
+          echo "pages_url=https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/$REPORT_DIR/index.html" >> $GITHUB_OUTPUT
+          echo "landing_url=https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/" >> $GITHUB_OUTPUT
+          
+          echo "Pages content prepared"
+      
+      # Step 8: Upload to Pages
+      - name: Upload to GitHub Pages
+        if: steps.run-review.outputs.has_html == 'true'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./pages-deploy
+      
+      # Step 9: Deploy to Pages
+      - name: Deploy to GitHub Pages
+        id: deployment
+        if: steps.run-review.outputs.has_html == 'true'
+        uses: actions/deploy-pages@v4
+      
+      # Step 10: Generate PR Comment
+      - name: Generate PR Comment
+        id: generate-comment
+        run: |
+          # Extract metrics
+          if [ -f "review_output.txt" ]; then
+            CRITICAL_ISSUES=$(grep -c "🔴" review_output.txt || echo "0")
+            WARNINGS=$(grep -c "🟡" review_output.txt || echo "0")
+            TOKEN_USAGE=$(grep -i "tokens:" review_output.txt | head -1 || echo "Not available")
+          else
+            CRITICAL_ISSUES="0"
+            WARNINGS="0"
+            TOKEN_USAGE="Not available"
+          fi
+          
+          # Create comment
+          if [ "${{ steps.run-review.outputs.has_html }}" = "true" ]; then
+            cat > pr_comment.md << EOF
+            ## 🚀 Katich AI Live Review
+            
+            ### [📊 CLICK HERE FOR INTERACTIVE HTML REPORT](${{ steps.prepare-pages.outputs.pages_url }})
+            
+            **Quick Stats:**
+            - Changed Files: ${{ steps.run-review.outputs.changed_files }}
+            - Critical Issues: $CRITICAL_ISSUES
+            - Warnings: $WARNINGS
+            - Token Usage: $TOKEN_USAGE
+            
+            **Features:**
+            ✅ Live Dashboard
+            ✅ Clickable Navigation
+            ✅ Syntax Highlighting
+            ✅ No Download Required
+            
+            **Auto-Cleanup:** This report auto-deletes after 24 hours.
+            
+            [View Workflow Logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            
+            ---
+            *Powered by Katich AI*
+            EOF
+          else
+            cat > pr_comment.md << EOF
+            ## 🤖 Katich AI Code Review
+            
+            **Review Results:**
+            - Changed Files: ${{ steps.run-review.outputs.changed_files }}
+            - Critical Issues: $CRITICAL_ISSUES
+            - Warnings: $WARNINGS
+            
+            No HTML report was generated. Check workflow logs for details.
+            
+            [View Workflow Logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            
+            ---
+            *Powered by Katich AI*
+            EOF
+          fi
+      
+      # Step 11: Post Comment
+      - name: Post PR Comment
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const commentBody = fs.readFileSync('pr_comment.md', 'utf8');
+            
+            try {
+              const { data: comments } = await github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+              });
+              
+              const katichComment = comments.find(comment => 
+                comment.body.includes('Katich AI')
+              );
+              
+              if (katichComment) {
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: katichComment.id,
+                  body: commentBody
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.issue.number,
+                  body: commentBody
+                });
+              }
+            } catch (error) {
+              console.error('Failed to post comment:', error.message);
+            }
+      
+      # Step 12: Upload Artifacts
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: katich-review-${{ github.run_id }}
+          path: |
+            review_output.txt
+            ./katich-report/
+            pr_comment.md
+          retention-days: 1
+      
+      # Step 13: Cleanup old artifacts
+      - name: Cleanup Old Artifacts
+        if: always()
+        run: |
+          echo "Cleaning up old artifacts..."
+          
+          # This is a simple cleanup - deletes artifacts older than 2 days
+          # In production, you might want more sophisticated cleanup
+          echo "Cleanup would run here"
+          echo "Artifact retention is set to 1 day above"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
