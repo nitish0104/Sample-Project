@@ -1,232 +1,655 @@
-name: Katich AI Code Review with Live HTML
+name: Katich AI Code Review
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-
-permissions:
-  contents: write
-  pages: write
-  id-token: write
-  pull-requests: write
-  actions: write
+    branches:
+      - main
+      - develop
+      - master
 
 jobs:
   katich-review:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      contents: read
+      pull-requests: write
     
     steps:
-      # Step 1: Checkout code
-      - name: Checkout repository
+      - name: Checkout base branch with full history
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.base.ref }}
           fetch-depth: 0
       
-      # Step 2: Setup Pages
-      - name: Setup Pages
-        uses: actions/configure-pages@v3
-      
-      # Step 3: Fetch PR branch
       - name: Fetch PR head branch
         run: |
+          echo "🔄 Fetching PR branches..."
           git fetch origin ${{ github.event.pull_request.head.ref }}
+          
+          echo "📊 Repository state:"
+          echo "Base branch: ${{ github.event.pull_request.base.ref }}"
+          echo "Head branch: ${{ github.event.pull_request.head.ref }}"
+          echo ""
+          echo "Available branches:"
+          git branch -a | grep -E "${{ github.event.pull_request.base.ref }}|${{ github.event.pull_request.head.ref }}"
       
-      # Step 4: Install Katich
-      - name: Install Katich
+      - name: Download and Install Katich
         run: |
+          echo "📥 Downloading Katich..."
           curl -L https://github.com/kodehash/katichai-dist/releases/latest/download/katich_linux_amd64.tar.gz -o katich.tar.gz
           tar -xzf katich.tar.gz
           chmod +x katich-linux-amd64
           sudo mv katich-linux-amd64 /usr/local/bin/katich
-          katich version || echo "Katich installed"
+          
+          echo "✅ Katich installed:"
+          katich version
       
-      # Step 5: Configure Katich
+      - name: Initialize Katich
+        run: |
+          echo "🚀 Initializing Katich..."
+          katich init
+          echo "✅ Katich configuration created"
+          ls -la .katich/
+      
       - name: Configure Katich
         env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           KATICH_LLM_API_KEY: ${{ secrets.KATICH_LLM_API_KEY }}
         run: |
-          katich init
-          cat > .katich/config.yaml << 'EOF'
+          # Determine which API to use (priority order)
+          if [ ! -z "$OPENAI_API_KEY" ]; then
+            echo "🔑 Configuring OpenAI provider..."
+            API_PROVIDER="openai"
+            API_KEY_TO_USE="$OPENAI_API_KEY"
+            API_KEY_TO_TEST="$OPENAI_API_KEY"
+          elif [ ! -z "$KATICH_LLM_API_KEY" ]; then
+            echo "🔑 Configuring OpenAI provider (from KATICH_LLM_API_KEY)..."
+            API_PROVIDER="openai"
+            API_KEY_TO_USE="$KATICH_LLM_API_KEY"
+            API_KEY_TO_TEST="$KATICH_LLM_API_KEY"
+          elif [ ! -z "$ANTHROPIC_API_KEY" ]; then
+            echo "🔑 Configuring Anthropic provider..."
+            API_PROVIDER="anthropic"
+            API_KEY_TO_USE="$ANTHROPIC_API_KEY"
+            API_KEY_TO_TEST="$ANTHROPIC_API_KEY"
+          else
+            echo "::error::❌ No API key found!"
+            echo "Please set OPENAI_API_KEY or ANTHROPIC_API_KEY in repository secrets"
+            echo "Go to: Settings > Secrets and variables > Actions > New repository secret"
+            exit 1
+          fi
+          
+          # Create optimized config based on provider
+          if [ "$API_PROVIDER" = "openai" ]; then
+            cat > .katich/config.yaml << EOF
           project_name: ${{ github.repository }}
+          
           llm:
             provider: openai
             model: gpt-4o
+            api_key: "$API_KEY_TO_USE"
+            max_input_tokens: 100000
+            max_tokens: 4000
+          
           embeddings:
             provider: openai
+            model: text-embedding-3-small
+          
           review:
             generate_html: true
-            html_output_path: ./katich-report
+            html_output_path: .katich/reports
+          
+          analysis:
+            max_function_length: 50
+            complexity_threshold: 10
+            similarity_threshold: 0.70
+            min_function_lines: 5
+            duplicate_threshold: 0.85
+            ignore_trivial_patterns: true
+            sampling:
+              enabled: true
+              max_files: 50
+              context_lines: 2
+              skip_generated: true
+              skip_tests: false
+              adaptive_budget: true
           EOF
+            echo "✅ OpenAI configured: gpt-4o (128K input, 4K output)"
+          else
+            cat > .katich/config.yaml << EOF
+          project_name: ${{ github.repository }}
+          
+          llm:
+            provider: anthropic
+            model: claude-3-5-sonnet-20241022
+            api_key: "$API_KEY_TO_USE"
+            max_input_tokens: 150000
+            max_tokens: 4000
+          
+          embeddings:
+            provider: openai
+            model: text-embedding-3-small
+          
+          review:
+            generate_html: true
+            html_output_path: .katich/reports
+          
+          analysis:
+            max_function_length: 50
+            complexity_threshold: 10
+            similarity_threshold: 0.70
+            min_function_lines: 5
+            duplicate_threshold: 0.85
+            ignore_trivial_patterns: true
+            sampling:
+              enabled: true
+              max_files: 50
+              context_lines: 2
+              skip_generated: true
+              skip_tests: false
+              adaptive_budget: true
+          EOF
+            echo "✅ Anthropic configured: claude-3-5-sonnet (200K context)"
+          fi
+          
+          # Export for next step
+          echo "API_PROVIDER=$API_PROVIDER" >> $GITHUB_ENV
+          echo "API_KEY_TO_TEST=$API_KEY_TO_TEST" >> $GITHUB_ENV
+          
+          echo ""
+          echo "📋 Configuration preview:"
+          grep -E "provider:|model:|max_tokens:" .katich/config.yaml
       
-      # Step 6: Run Review
-      - name: Run Katich Review
-        id: run-review
+      - name: Verify API Key
+        env:
+          API_PROVIDER: ${{ env.API_PROVIDER }}
+          API_KEY_TO_TEST: ${{ env.API_KEY_TO_TEST }}
+        run: |
+          echo "🔍 Testing API key connectivity..."
+          
+          if [ "$API_PROVIDER" = "openai" ]; then
+            echo "Testing OpenAI API key..."
+            
+            # Test OpenAI API
+            HTTP_CODE=$(curl -s -o response.json -w "%{http_code}" \
+              https://api.openai.com/v1/models \
+              -H "Authorization: Bearer $API_KEY_TO_TEST" \
+              -H "Content-Type: application/json")
+            
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "✅ OpenAI API key is valid and working!"
+              echo "📊 Available models:"
+              cat response.json | grep -o '"id":"[^"]*"' | head -5 | sed 's/"id":"\([^"]*\)"/  - \1/'
+            elif [ "$HTTP_CODE" = "401" ]; then
+              echo "::error::❌ OpenAI API key is INVALID!"
+              echo "The API key authentication failed."
+              echo "Please check:"
+              echo "  1. The API key is correct (should start with 'sk-')"
+              echo "  2. The key hasn't been revoked"
+              echo "  3. Copy-paste the key carefully without extra spaces"
+              cat response.json
+              exit 1
+            elif [ "$HTTP_CODE" = "429" ]; then
+              echo "::warning::⚠️ Rate limit reached or quota exceeded"
+              echo "Please check your OpenAI account:"
+              echo "  1. Visit: https://platform.openai.com/usage"
+              echo "  2. Ensure you have credits available"
+              echo "  3. Check if you've hit rate limits"
+              cat response.json
+              exit 1
+            else
+              echo "::warning::⚠️ Unexpected response from OpenAI API (HTTP $HTTP_CODE)"
+              echo "Response:"
+              cat response.json
+              echo ""
+              echo "Continuing anyway, but review may fail..."
+            fi
+            
+          elif [ "$API_PROVIDER" = "anthropic" ]; then
+            echo "Testing Anthropic API key..."
+            
+            # Test Anthropic API
+            HTTP_CODE=$(curl -s -o response.json -w "%{http_code}" \
+              https://api.anthropic.com/v1/messages \
+              -H "x-api-key: $API_KEY_TO_TEST" \
+              -H "anthropic-version: 2023-06-01" \
+              -H "content-type: application/json" \
+              -d '{
+                "model": "claude-3-5-sonnet-20241022",
+                "max_tokens": 10,
+                "messages": [{"role": "user", "content": "test"}]
+              }')
+            
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "✅ Anthropic API key is valid and working!"
+            elif [ "$HTTP_CODE" = "401" ]; then
+              echo "::error::❌ Anthropic API key is INVALID!"
+              echo "The API key authentication failed."
+              echo "Please check your API key at: https://console.anthropic.com/"
+              cat response.json
+              exit 1
+            elif [ "$HTTP_CODE" = "429" ]; then
+              echo "::warning::⚠️ Rate limit reached"
+              echo "Please check your Anthropic account usage"
+              cat response.json
+              exit 1
+            else
+              echo "::warning::⚠️ Unexpected response from Anthropic API (HTTP $HTTP_CODE)"
+              cat response.json
+              echo ""
+              echo "Continuing anyway, but review may fail..."
+            fi
+          fi
+          
+          # Clean up
+          rm -f response.json
+          
+          echo ""
+          echo "✅ API key verification complete!"
+      
+      - name: Build Context (Optional)
+        continue-on-error: true
+        run: |
+          echo "🔍 Building context for better review quality..."
+          # Add timeout to prevent hanging
+          timeout 300 katich context build || {
+            echo "⚠️ Context build timed out or failed - continuing without context"
+            echo "This is not critical, reviews will still work"
+          }
+      
+      - name: Verify Git Diff
+        id: verify-diff
         run: |
           BASE_BRANCH="${{ github.event.pull_request.base.ref }}"
           HEAD_BRANCH="origin/${{ github.event.pull_request.head.ref }}"
           
-          echo "Review range: $BASE_BRANCH..$HEAD_BRANCH"
+          echo "📊 Checking for changes between branches..."
+          echo "Comparing: $BASE_BRANCH..$HEAD_BRANCH"
           
-          # Run review
-          katich review diff "$BASE_BRANCH".."$HEAD_BRANCH" 2>&1 | tee review_output.txt
+          # Verify both branches exist
+          if ! git rev-parse "$BASE_BRANCH" >/dev/null 2>&1; then
+            echo "::error::Base branch not found: $BASE_BRANCH"
+            exit 1
+          fi
           
-          # Clean ANSI codes
-          sed -i 's/\x1b\[[0-9;]*[a-zA-Z]//g' review_output.txt
+          if ! git rev-parse "$HEAD_BRANCH" >/dev/null 2>&1; then
+            echo "::error::Head branch not found: $HEAD_BRANCH"
+            exit 1
+          fi
           
-          # Count changed files
+          # Count changes
           CHANGED_FILES=$(git diff --name-only "$BASE_BRANCH".."$HEAD_BRANCH" | wc -l)
-          echo "changed_files=$CHANGED_FILES" >> $GITHUB_OUTPUT
+          echo "changes=$CHANGED_FILES" >> $GITHUB_OUTPUT
           
-          # Check if HTML was generated
-          if [ -d "./katich-report" ] && ls ./katich-report/*.html 1> /dev/null 2>&1; then
-            echo "has_html=true" >> $GITHUB_OUTPUT
+          echo "✅ Found $CHANGED_FILES changed file(s)"
+          
+          if [ "$CHANGED_FILES" -eq 0 ]; then
+            echo "::warning::No file changes detected between branches"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
           else
-            echo "has_html=false" >> $GITHUB_OUTPUT
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo ""
+            echo "📝 Changed files (first 10):"
+            git diff --name-only "$BASE_BRANCH".."$HEAD_BRANCH" | head -10
           fi
       
-      # Step 7: Prepare Pages Content
-      - name: Prepare GitHub Pages Content
-        id: prepare-pages
-        if: steps.run-review.outputs.has_html == 'true'
+      - name: Run Katich Review
+        if: steps.verify-diff.outputs.has_changes == 'true'
+        id: run-review
+        continue-on-error: true
         run: |
-          PR_NUMBER="${{ github.event.pull_request.number }}"
-          RUN_ID="${{ github.run_id }}"
-          REPORT_DIR="pr-$PR_NUMBER-$RUN_ID"
+          BASE_BRANCH="${{ github.event.pull_request.base.ref }}"
+          HEAD_BRANCH="origin/${{ github.event.pull_request.head.ref }}"
           
-          # Create deployment directory
-          mkdir -p "./pages-deploy/$REPORT_DIR"
+          echo "🤖 Starting Katich AI Review..."
+          echo "📊 Review range: $BASE_BRANCH..$HEAD_BRANCH"
+          echo ""
           
-          # Copy HTML report
-          HTML_FILE=$(find ./katich-report -name "*.html" -type f | head -1)
-          if [ -f "$HTML_FILE" ]; then
-            cp "$HTML_FILE" "./pages-deploy/$REPORT_DIR/index.html"
+          # Run review and capture all output
+          set +e  # Don't exit on error
+          katich review diff "$BASE_BRANCH".."$HEAD_BRANCH" 2>&1 | tee review_output.txt
+          REVIEW_EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          
+          echo ""
+          echo "review_exit_code=$REVIEW_EXIT_CODE" >> $GITHUB_OUTPUT
+          
+          if [ $REVIEW_EXIT_CODE -eq 0 ]; then
+            echo "✅ Review completed successfully"
+          else
+            echo "⚠️ Review exited with code: $REVIEW_EXIT_CODE"
             
-            # Copy supporting files
-            find ./katich-report -type f \( -name "*.css" -o -name "*.js" -o -name "*.png" -o -name "*.svg" \) \
-              -exec cp {} "./pages-deploy/$REPORT_DIR/" \; 2>/dev/null || true
+            # Check for specific error patterns
+            if grep -qi "api key\|authentication\|unauthorized" review_output.txt; then
+              echo "::error::API authentication failed. Please check your API key and credits."
+            elif grep -qi "timeout\|timed out" review_output.txt; then
+              echo "::error::Request timed out. The API provider may be slow or unavailable."
+            elif grep -qi "rate limit" review_output.txt; then
+              echo "::error::Rate limit exceeded. Please wait and try again."
+            elif grep -qi "no changes\|no files" review_output.txt; then
+              echo "::warning::No reviewable changes found."
+            else
+              echo "::error::Review failed. Check the output above for details."
+            fi
           fi
           
-          # Create landing page
-          cat > "./pages-deploy/index.html" << 'EOF'
-          <!DOCTYPE html>
-          <html>
-          <head>
-            <title>Katich AI Review Reports</title>
-            <style>
-              body { font-family: sans-serif; max-width: 800px; margin: 40px auto; padding: 20px; }
-              .report { border: 1px solid #ddd; border-radius: 6px; padding: 20px; margin: 20px 0; }
-              h1 { color: #0366d6; }
-              a { color: #0366d6; text-decoration: none; }
-              a:hover { text-decoration: underline; }
-            </style>
-          </head>
-          <body>
-            <h1>Katich AI Review Reports</h1>
-            <p>Interactive code review reports for pull requests.</p>
-            <div class="report">
-              <h3><a href="$REPORT_DIR/index.html">PR #$PR_NUMBER Review</a></h3>
-              <p><strong>Repository:</strong> ${{ github.repository }}</p>
-              <p><strong>Base:</strong> ${{ github.event.pull_request.base.ref }}</p>
-              <p><strong>Head:</strong> ${{ github.event.pull_request.head.ref }}</p>
-              <a href="$REPORT_DIR/index.html" style="display: inline-block; padding: 10px 20px; background: #0366d6; color: white; border-radius: 6px;">
-                View Interactive Report
-              </a>
-            </div>
-            <footer style="margin-top: 40px; color: #666; font-size: 14px;">
-              <p>Generated by Katich AI - Reports auto-delete after 24 hours</p>
-            </footer>
-          </body>
-          </html>
+          # Check if reports were generated
+          if [ -d ".katich/reports" ] && [ "$(ls -A .katich/reports 2>/dev/null)" ]; then
+            echo "✅ HTML reports generated:"
+            ls -lh .katich/reports/
+            echo "has_reports=true" >> $GITHUB_OUTPUT
+          else
+            echo "⚠️ No HTML reports generated"
+            echo "has_reports=false" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Handle No Changes
+        if: steps.verify-diff.outputs.has_changes == 'false'
+        run: |
+          cat > review_output.txt << 'EOF'
+          ## ℹ️ No Changes to Review
+          
+          No file changes were detected between the base and head branches.
+          This PR may only contain merge commits or identical content.
           EOF
           
-          # Replace placeholder
-          sed -i "s/\$REPORT_DIR/$REPORT_DIR/g" "./pages-deploy/index.html"
-          
-          # Set outputs
-          echo "report_dir=$REPORT_DIR" >> $GITHUB_OUTPUT
-          echo "pages_url=https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/$REPORT_DIR/index.html" >> $GITHUB_OUTPUT
-          echo "landing_url=https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/" >> $GITHUB_OUTPUT
-          
-          echo "Pages content prepared"
+          echo "ℹ️ No changes to review - skipping analysis"
       
-      # Step 8: Upload to Pages
-      - name: Upload to GitHub Pages
-        if: steps.run-review.outputs.has_html == 'true'
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: ./pages-deploy
-      
-      # Step 9: Deploy to Pages
-      - name: Deploy to GitHub Pages
-        id: deployment
-        if: steps.run-review.outputs.has_html == 'true'
-        uses: actions/deploy-pages@v4
-      
-      # Step 10: Generate PR Comment
-      - name: Generate PR Comment
-        id: generate-comment
+      - name: Move Reports to Comments Directory
+        if: steps.run-review.outputs.has_reports == 'true'
         run: |
-          # Extract metrics
-          if [ -f "review_output.txt" ]; then
-            CRITICAL_ISSUES=$(grep -c "🔴" review_output.txt || echo "0")
-            WARNINGS=$(grep -c "🟡" review_output.txt || echo "0")
-            TOKEN_USAGE=$(grep -i "tokens:" review_output.txt | head -1 || echo "Not available")
+          mkdir -p comments
+          mv .katich/reports/* comments/ 2>/dev/null || true
+          echo "✅ Reports moved to comments directory"
+          ls -la comments/
+      
+      - name: Generate PR Comment
+        if: always()
+        run: |
+          if [ "${{ steps.verify-diff.outputs.has_changes }}" = "false" ]; then
+            # No changes case
+            cat > pr_comment.md << 'EOF'
+          ## 🤖 Katich AI Code Review
+          
+          ### ℹ️ No Changes Detected
+          
+          No file changes were found between the base and head branches.
+          This may occur if:
+          - The PR only contains merge commits
+          - The branches have identical content
+          - All changes are in ignored files
+          
+          ---
+          *Generated by [Katich AI](https://github.com/kodehash/katichai-dist)*
+          EOF
+          
+          elif [ "${{ steps.run-review.outputs.review_exit_code }}" = "0" ]; then
+            # Success case - Extract data from HTML report
+            HTML_REPORT=$(find .katich/reports -name "*.html" -type f | head -1)
+            
+            if [ -f "$HTML_REPORT" ]; then
+              echo "📄 Found HTML report: $HTML_REPORT"
+              
+              # Extract summary from HTML
+              SUMMARY=$(grep -A 50 '<div class="summary">' "$HTML_REPORT" | grep -o '<p>.*</p>' | sed 's/<[^>]*>//g' | head -1 || echo "No summary available")
+              
+              # Extract token usage
+              TOKENS=$(grep -o 'Tokens:.*total' "$HTML_REPORT" | sed 's/<[^>]*>//g' | head -1 || echo "")
+              
+              # Count critical issues
+              CRITICAL_COUNT=$(grep -c 'class="issue critical"' "$HTML_REPORT" 2>/dev/null || echo "0")
+              WARNING_COUNT=$(grep -c 'class="issue warning"' "$HTML_REPORT" 2>/dev/null || echo "0")
+              
+              # Extract file sampling info
+              FILES_REVIEWED=$(grep -o 'Reviewing:.*files' "$HTML_REPORT" | sed 's/<[^>]*>//g' | head -1 || echo "")
+              
+              # Start building the comment
+              cat > pr_comment.md << EOF
+          ## 🤖 Katich AI Code Review Report
+          
+          ### 📊 Overview
+          
+          | Metric | Value |
+          |--------|-------|
+          | 📝 Files Reviewed | $FILES_REVIEWED |
+          | 🔴 Critical Issues | $CRITICAL_COUNT |
+          | 🟡 Warnings | $WARNING_COUNT |
+          | 💰 Token Usage | $TOKENS |
+          
+          ---
+          
+          ### 📌 Summary
+          
+          $SUMMARY
+          
+          ---
+          
+          EOF
+              
+              # Extract and display critical issues
+              if [ "$CRITICAL_COUNT" -gt 0 ] || [ "$WARNING_COUNT" -gt 0 ]; then
+                echo "### ⚠️ Issues Found" >> pr_comment.md
+                echo "" >> pr_comment.md
+                
+                # Extract issues from review_output.txt (better formatted)
+                if [ -f "review_output.txt" ]; then
+                  if grep -q "⚠️.*CRITICAL ISSUES" review_output.txt; then
+                    echo "#### Critical Issues" >> pr_comment.md
+                    echo "" >> pr_comment.md
+                    sed -n '/⚠️.*CRITICAL ISSUES/,/^💡\|^✅\|^📊\|^🔧\|^🔄/p' review_output.txt | \
+                      grep -v "⚠️.*CRITICAL ISSUES" | \
+                      grep -v "^💡\|^✅\|^📊\|^🔧\|^🔄" | \
+                      grep -v "^$" | \
+                      sed 's/^//' >> pr_comment.md
+                    echo "" >> pr_comment.md
+                  fi
+                fi
+              else
+                echo "### ✅ No Issues Found" >> pr_comment.md
+                echo "" >> pr_comment.md
+                echo "Great work! No critical issues or warnings detected. 🎉" >> pr_comment.md
+                echo "" >> pr_comment.md
+              fi
+              
+              # Extract suggestions
+              if [ -f "review_output.txt" ] && grep -q "💡 SUGGESTIONS" review_output.txt; then
+                echo "---" >> pr_comment.md
+                echo "" >> pr_comment.md
+                echo "### 💡 Suggestions" >> pr_comment.md
+                echo "" >> pr_comment.md
+                sed -n '/💡 SUGGESTIONS/,/^⚠️\|^✅\|^📊\|^🔧\|^🔄/p' review_output.txt | \
+                  grep -v "💡 SUGGESTIONS" | \
+                  grep -v "^⚠️\|^✅\|^📊\|^🔧\|^🔄" | \
+                  grep -v "^$" | \
+                  sed 's/^//' >> pr_comment.md
+                echo "" >> pr_comment.md
+              fi
+              
+              # Add collapsible sections for advanced analysis
+              echo "---" >> pr_comment.md
+              echo "" >> pr_comment.md
+              echo "### 📊 Detailed Analysis" >> pr_comment.md
+              echo "" >> pr_comment.md
+              
+              # Static Analysis section
+              if [ -f "review_output.txt" ] && grep -q "📊 STATIC ANALYSIS" review_output.txt; then
+                echo "<details>" >> pr_comment.md
+                echo "<summary>📊 Static Analysis</summary>" >> pr_comment.md
+                echo "" >> pr_comment.md
+                echo "\`\`\`" >> pr_comment.md
+                sed -n '/📊 STATIC ANALYSIS/,/^⚠️\|^✅\|^💡\|^🔧\|^🔄\|^🤖/p' review_output.txt | \
+                  grep -v "📊 STATIC ANALYSIS" | \
+                  grep -v "^⚠️\|^✅\|^💡\|^🔧\|^🔄\|^🤖" | \
+                  sed 's/\x1b\[[0-9;]*m//g' >> pr_comment.md
+                echo "\`\`\`" >> pr_comment.md
+                echo "</details>" >> pr_comment.md
+                echo "" >> pr_comment.md
+              fi
+              
+              # Duplicate Code section
+              if [ -f "review_output.txt" ] && grep -q "🔄 DUPLICATE CODE" review_output.txt; then
+                echo "<details>" >> pr_comment.md
+                echo "<summary>🔄 Duplicate Code Detection</summary>" >> pr_comment.md
+                echo "" >> pr_comment.md
+                echo "\`\`\`" >> pr_comment.md
+                sed -n '/🔄 DUPLICATE CODE/,/^⚠️\|^✅\|^💡\|^📊\|^🔧\|^🤖/p' review_output.txt | \
+                  grep -v "🔄 DUPLICATE CODE" | \
+                  grep -v "^⚠️\|^✅\|^💡\|^📊\|^🔧\|^🤖" | \
+                  sed 's/\x1b\[[0-9;]*m//g' >> pr_comment.md
+                echo "\`\`\`" >> pr_comment.md
+                echo "</details>" >> pr_comment.md
+                echo "" >> pr_comment.md
+              fi
+              
+              # AI-Generated Code section
+              if [ -f "review_output.txt" ] && grep -q "🤖 AI-GENERATED CODE" review_output.txt; then
+                echo "<details>" >> pr_comment.md
+                echo "<summary>🤖 AI-Generated Code Analysis</summary>" >> pr_comment.md
+                echo "" >> pr_comment.md
+                echo "\`\`\`" >> pr_comment.md
+                sed -n '/🤖 AI-GENERATED CODE/,/^⚠️\|^✅\|^💡\|^📊\|^🔧\|^🔄/p' review_output.txt | \
+                  grep -v "🤖 AI-GENERATED CODE" | \
+                  grep -v "^⚠️\|^✅\|^💡\|^📊\|^🔧\|^🔄" | \
+                  sed 's/\x1b\[[0-9;]*m//g' >> pr_comment.md
+                echo "\`\`\`" >> pr_comment.md
+                echo "</details>" >> pr_comment.md
+                echo "" >> pr_comment.md
+              fi
+              
+              # Complexity section
+              if [ -f "review_output.txt" ] && grep -q "🔧 UNNECESSARY COMPLEXITY" review_output.txt; then
+                echo "<details>" >> pr_comment.md
+                echo "<summary>🔧 Code Complexity Analysis</summary>" >> pr_comment.md
+                echo "" >> pr_comment.md
+                echo "\`\`\`" >> pr_comment.md
+                sed -n '/🔧 UNNECESSARY COMPLEXITY/,/^⚠️\|^✅\|^💡\|^📊\|^🔄\|^🤖/p' review_output.txt | \
+                  grep -v "🔧 UNNECESSARY COMPLEXITY" | \
+                  grep -v "^⚠️\|^✅\|^💡\|^📊\|^🔄\|^🤖" | \
+                  sed 's/\x1b\[[0-9;]*m//g' >> pr_comment.md
+                echo "\`\`\`" >> pr_comment.md
+                echo "</details>" >> pr_comment.md
+                echo "" >> pr_comment.md
+              fi
+              
+              # Add full HTML report section
+              cat >> pr_comment.md << 'ENDOFCOMMENT'
+          ---
+          
+          ### 📄 Full Interactive Report
+          
+          <details>
+          <summary>🎨 Click to view complete HTML report details</summary>
+          
+          The complete interactive HTML report includes:
+          
+          #### 📊 Dashboard Features
+          - **Interactive Metrics** - Visual charts and graphs
+          - **File Navigation** - Quick jump to any file
+          - **Syntax Highlighting** - Color-coded code snippets
+          - **Search Functionality** - Find specific issues
+          
+          #### 🔍 Detailed Sections
+          - **File Sampling** - Which files were analyzed
+          - **Critical Issues** - Full context and code snippets  
+          - **Suggestions** - Detailed improvement recommendations
+          - **Duplicate Code** - Side-by-side comparisons
+          - **Static Analysis** - Complete metrics breakdown
+          - **AI Detection** - Function-level analysis
+          
+          #### 💾 How to Access
+          1. Go to the [**Actions tab**](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          2. Scroll to **Artifacts** section
+          3. Download `katich-review-report-${{ github.event.pull_request.number }}`
+          4. Open the HTML file in your browser
+          
+          </details>
+          
+          ---
+          
+          <details>
+          <summary>ℹ️ Review Configuration</summary>
+          
+          | Setting | Value |
+          |---------|-------|
+          | **Model** | GPT-4o (128K context) |
+          | **Base Branch** | `${{ github.event.pull_request.base.ref }}` |
+          | **Head Branch** | `${{ github.event.pull_request.head.ref }}` |
+          | **Commit** | `${{ github.sha }}` |
+          | **Files Changed** | ${{ steps.verify-diff.outputs.changes }} |
+          
+          </details>
+          
+          ---
+          
+          <div align="center">
+          
+          *🤖 Generated by [Katich AI](https://github.com/kodehash/katichai-dist)*
+          
+          *📊 [View Workflow Logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) • ⚙️ [Configure Settings](https://github.com/${{ github.repository }}/blob/main/.github/workflows)*
+          
+          </div>
+          ENDOFCOMMENT
+              
+            else
+              # Fallback if HTML not found - use text output
+              cat > pr_comment.md << 'EOF'
+          ## 🤖 Katich AI Code Review
+          
+          ### Review Summary
+          
+          EOF
+              
+              if [ -f "review_output.txt" ]; then
+                echo '```' >> pr_comment.md
+                cat review_output.txt >> pr_comment.md
+                echo '```' >> pr_comment.md
+              fi
+              
+              cat >> pr_comment.md << 'EOF'
+          
+          ---
+          *Generated by [Katich AI](https://github.com/kodehash/katichai-dist)*
+          EOF
+            fi
+          
           else
-            CRITICAL_ISSUES="0"
-            WARNINGS="0"
-            TOKEN_USAGE="Not available"
+            # Failure case
+            cat > pr_comment.md << 'EOF'
+          ## ⚠️ Katich AI Code Review - Error
+          
+          The code review encountered an error and could not complete successfully.
+          
+          ### Common Issues and Solutions:
+          
+          1. **API Key Problems**
+             - Verify your API key is correct in repository secrets
+             - Check that your API account has sufficient credits
+             - Ensure the key has not expired
+          
+          2. **Network Issues**
+             - The API provider may be experiencing downtime
+             - Rate limits may have been exceeded
+          
+          3. **Configuration Issues**
+             - Check that branches exist and are accessible
+             - Verify repository permissions
+          
+          ### Next Steps:
+          - Check the [workflow logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for detailed error messages
+          - Try re-running the workflow
+          - Test locally: `katich review diff ${{ github.event.pull_request.base.ref }}..origin/${{ github.event.pull_request.head.ref }}`
+          
+          ---
+          
+          *Generated by [Katich AI](https://github.com/kodehash/katichai-dist)*
+          EOF
           fi
           
-          # Create comment
-          if [ "${{ steps.run-review.outputs.has_html }}" = "true" ]; then
-            cat > pr_comment.md << EOF
-            ## 🚀 Katich AI Live Review
-            
-            ### [📊 CLICK HERE FOR INTERACTIVE HTML REPORT](${{ steps.prepare-pages.outputs.pages_url }})
-            
-            **Quick Stats:**
-            - Changed Files: ${{ steps.run-review.outputs.changed_files }}
-            - Critical Issues: $CRITICAL_ISSUES
-            - Warnings: $WARNINGS
-            - Token Usage: $TOKEN_USAGE
-            
-            **Features:**
-            ✅ Live Dashboard
-            ✅ Clickable Navigation
-            ✅ Syntax Highlighting
-            ✅ No Download Required
-            
-            **Auto-Cleanup:** This report auto-deletes after 24 hours.
-            
-            [View Workflow Logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
-            
-            ---
-            *Powered by Katich AI*
-            EOF
-          else
-            cat > pr_comment.md << EOF
-            ## 🤖 Katich AI Code Review
-            
-            **Review Results:**
-            - Changed Files: ${{ steps.run-review.outputs.changed_files }}
-            - Critical Issues: $CRITICAL_ISSUES
-            - Warnings: $WARNINGS
-            
-            No HTML report was generated. Check workflow logs for details.
-            
-            [View Workflow Logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
-            
-            ---
-            *Powered by Katich AI*
-            EOF
-          fi
+          echo "✅ PR comment generated"
       
-      # Step 11: Post Comment
-      - name: Post PR Comment
+      - name: Post Review as PR Comment
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -235,6 +658,7 @@ jobs:
             const commentBody = fs.readFileSync('pr_comment.md', 'utf8');
             
             try {
+              // Find existing Katich comment
               const { data: comments } = await github.rest.issues.listComments({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -242,48 +666,87 @@ jobs:
               });
               
               const katichComment = comments.find(comment => 
-                comment.body.includes('Katich AI')
+                comment.body.includes('🤖 Katich AI Code Review')
               );
               
               if (katichComment) {
+                // Update existing comment
                 await github.rest.issues.updateComment({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
                   comment_id: katichComment.id,
                   body: commentBody
                 });
+                console.log('✅ Updated existing Katich comment');
               } else {
+                // Create new comment
                 await github.rest.issues.createComment({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
                   issue_number: context.issue.number,
                   body: commentBody
                 });
+                console.log('✅ Posted new Katich comment');
               }
             } catch (error) {
-              console.error('Failed to post comment:', error.message);
+              console.error('❌ Failed to post comment:', error.message);
+              core.setFailed('Failed to post PR comment');
             }
       
-      # Step 12: Upload Artifacts
       - name: Upload Artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: katich-review-${{ github.run_id }}
+          name: katich-review-report-${{ github.event.pull_request.number }}
           path: |
+            comments/*.html
             review_output.txt
-            ./katich-report/
             pr_comment.md
-          retention-days: 1
+            .katich/config.yaml
+          retention-days: 30
+          if-no-files-found: warn
       
-      # Step 13: Cleanup old artifacts
-      - name: Cleanup Old Artifacts
+      - name: Check for Critical Issues
+        if: steps.run-review.outputs.review_exit_code == '0'
+        run: |
+          if [ -f "review_output.txt" ]; then
+            # Look for security issues
+            if grep -q "🔴.*\[SECURITY\]" review_output.txt; then
+              echo "::warning::⚠️ Critical security issues found! Please review before merging."
+            fi
+            
+            # Count critical issues
+            CRITICAL_COUNT=$(grep -c "🔴" review_output.txt || echo "0")
+            if [ "$CRITICAL_COUNT" -gt 0 ]; then
+              echo "::notice::Found $CRITICAL_COUNT critical issue(s) - please review"
+            fi
+          fi
+      
+      - name: Workflow Summary
         if: always()
         run: |
-          echo "Cleaning up old artifacts..."
+          echo "## 🎯 Katich AI Review Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
           
-          # This is a simple cleanup - deletes artifacts older than 2 days
-          # In production, you might want more sophisticated cleanup
-          echo "Cleanup would run here"
-          echo "Artifact retention is set to 1 day above"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          if [ "${{ steps.verify-diff.outputs.has_changes }}" = "false" ]; then
+            echo "### ℹ️ No Changes to Review" >> $GITHUB_STEP_SUMMARY
+            echo "No file changes detected between branches." >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ steps.run-review.outputs.review_exit_code }}" = "0" ]; then
+            echo "### ✅ Review Completed Successfully" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "- **Changed Files**: ${{ steps.verify-diff.outputs.changes }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Reports Generated**: ${{ steps.run-review.outputs.has_reports == 'true' && 'Yes' || 'No' }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **PR Comment**: Posted" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ❌ Review Failed" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Exit code: ${{ steps.run-review.outputs.review_exit_code }}" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Check the workflow logs and PR comment for details." >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📋 Configuration" >> $GITHUB_STEP_SUMMARY
+          echo "- **Base Branch**: ${{ github.event.pull_request.base.ref }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Head Branch**: ${{ github.event.pull_request.head.ref }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **PR Number**: #${{ github.event.pull_request.number }}" >> $GITHUB_STEP_SUMMARY
