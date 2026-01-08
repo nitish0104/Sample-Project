@@ -61,28 +61,18 @@ jobs:
           # Determine which API to use (priority order)
           if [ ! -z "$OPENAI_API_KEY" ]; then
             echo "🔑 Configuring OpenAI provider..."
-            # Use gpt-4-turbo-preview for larger context (128K tokens)
-            sed -i "s/model: gpt-4/model: gpt-4-turbo-preview/g" .katich/config.yaml
-            sed -i "s/max_input_tokens: 20000/max_input_tokens: 100000/g" .katich/config.yaml
-            sed -i "s/api_key: \"\"/api_key: \"$OPENAI_API_KEY\"/g" .katich/config.yaml
-            echo "✅ OpenAI API key configured with gpt-4-turbo-preview (128K context)"
             API_PROVIDER="openai"
+            API_KEY_TO_USE="$OPENAI_API_KEY"
             API_KEY_TO_TEST="$OPENAI_API_KEY"
           elif [ ! -z "$KATICH_LLM_API_KEY" ]; then
             echo "🔑 Configuring OpenAI provider (from KATICH_LLM_API_KEY)..."
-            sed -i "s/model: gpt-4/model: gpt-4-turbo-preview/g" .katich/config.yaml
-            sed -i "s/max_input_tokens: 20000/max_input_tokens: 100000/g" .katich/config.yaml
-            sed -i "s/api_key: \"\"/api_key: \"$KATICH_LLM_API_KEY\"/g" .katich/config.yaml
-            echo "✅ OpenAI API key configured with gpt-4-turbo-preview (128K context)"
             API_PROVIDER="openai"
+            API_KEY_TO_USE="$KATICH_LLM_API_KEY"
             API_KEY_TO_TEST="$KATICH_LLM_API_KEY"
           elif [ ! -z "$ANTHROPIC_API_KEY" ]; then
             echo "🔑 Configuring Anthropic provider..."
-            sed -i "s/provider: openai/provider: anthropic/g" .katich/config.yaml
-            sed -i "s/model: gpt-4/model: claude-3-5-sonnet-20241022/g" .katich/config.yaml
-            sed -i "s/api_key: \"\"/api_key: \"$ANTHROPIC_API_KEY\"/g" .katich/config.yaml
-            echo "✅ Anthropic API key configured"
             API_PROVIDER="anthropic"
+            API_KEY_TO_USE="$ANTHROPIC_API_KEY"
             API_KEY_TO_TEST="$ANTHROPIC_API_KEY"
           else
             echo "::error::❌ No API key found!"
@@ -91,13 +81,86 @@ jobs:
             exit 1
           fi
           
+          # Create optimized config based on provider
+          if [ "$API_PROVIDER" = "openai" ]; then
+            cat > .katich/config.yaml << EOF
+          project_name: ${{ github.repository }}
+          
+          llm:
+            provider: openai
+            model: gpt-4o
+            api_key: "$API_KEY_TO_USE"
+            max_input_tokens: 100000
+            max_tokens: 4000
+          
+          embeddings:
+            provider: openai
+            model: text-embedding-3-small
+          
+          review:
+            generate_html: true
+            html_output_path: .katich/reports
+          
+          analysis:
+            max_function_length: 50
+            complexity_threshold: 10
+            similarity_threshold: 0.70
+            min_function_lines: 5
+            duplicate_threshold: 0.85
+            ignore_trivial_patterns: true
+            sampling:
+              enabled: true
+              max_files: 50
+              context_lines: 2
+              skip_generated: true
+              skip_tests: false
+              adaptive_budget: true
+          EOF
+            echo "✅ OpenAI configured: gpt-4o (128K input, 4K output)"
+          else
+            cat > .katich/config.yaml << EOF
+          project_name: ${{ github.repository }}
+          
+          llm:
+            provider: anthropic
+            model: claude-3-5-sonnet-20241022
+            api_key: "$API_KEY_TO_USE"
+            max_input_tokens: 150000
+            max_tokens: 4000
+          
+          embeddings:
+            provider: openai
+            model: text-embedding-3-small
+          
+          review:
+            generate_html: true
+            html_output_path: .katich/reports
+          
+          analysis:
+            max_function_length: 50
+            complexity_threshold: 10
+            similarity_threshold: 0.70
+            min_function_lines: 5
+            duplicate_threshold: 0.85
+            ignore_trivial_patterns: true
+            sampling:
+              enabled: true
+              max_files: 50
+              context_lines: 2
+              skip_generated: true
+              skip_tests: false
+              adaptive_budget: true
+          EOF
+            echo "✅ Anthropic configured: claude-3-5-sonnet (200K context)"
+          fi
+          
           # Export for next step
           echo "API_PROVIDER=$API_PROVIDER" >> $GITHUB_ENV
           echo "API_KEY_TO_TEST=$API_KEY_TO_TEST" >> $GITHUB_ENV
           
           echo ""
           echo "📋 Configuration preview:"
-          grep -E "provider:|model:" .katich/config.yaml
+          grep -E "provider:|model:|max_tokens:" .katich/config.yaml
       
       - name: Verify API Key
         env:
